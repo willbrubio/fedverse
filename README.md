@@ -6,19 +6,20 @@ This library was created for the intention of being used in conjunction with the
 
 ## Sub Library Architecture
 This library consists of sub libraries in this specific heiarchy:
-extracted<br>
-    fed3_fedframe.py<br>
-    fed3_loading.py<br>
-    fed3bandit_extracted.py<br>
-fedassays<br>
-    fedbandit.py<br>
-    fedpr1.py<br>
-    fedfr1.py<br>
-fedcore<br>
-    core.py<br>
-fedutils<br>
-    fedlog<br>
-
+```
+├──extracted
+|   ├──fed3_fedframe.py
+|   ├──fed3_loading.py
+|   └──fed3bandit_extracted.py
+├──fedassays
+|   ├──fedbandit.py
+|   ├──fedpr1.py
+|   └──fedfr1.py
+├──fedcore
+|   └──core.py
+├──fedutils
+|   └──fedlog.py
+```
 extracted:
 sublibrary extracted contains code from the fed3 and fed3bandit library needed for the analysis workflows.
 
