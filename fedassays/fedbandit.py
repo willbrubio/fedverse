@@ -10,12 +10,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pathlib import Path
+import re
 # import cousin
 from fedlib.fedutils.fedlog import status 
-
+from fedlib.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
 
 # ================================================================= Bandit Plotting ================================================================= #
-
+### ------ General Helper functions ------- ###
 def clean_key_filename_column(key_df):
     """
     ensure that the filename column in the meta data key file is normalized
@@ -36,7 +38,8 @@ def _coerce_numeric_col(df, col, clip_upper=None, na_map=None):
     Called in:
         _plot_file_core
     Arguments:
-        df - teh 
+        df - A FED dataframe
+        col - Specified column for attempted coercion to numeric type
     """
     if col not in df.columns:
         return
@@ -47,3 +50,367 @@ def _coerce_numeric_col(df, col, clip_upper=None, na_map=None):
     if clip_upper is not None:
         s.loc[s > clip_upper] = np.nan
     df[col] = s
+
+
+### ------- Main Plotting Function ------ ###
+def _plot_file_core(fed_list, metadata_df, root_path, dpi=150):
+    """
+    This function will take in a file index to create a bandit plot for a particular file
+    Aguments:
+        fed_list - the list contating multiple FED data frames  
+        metadata_df - the metadata file that has been stiched together in previous step of the workflow
+        root_path; string or Path object
+            the root path defined where the data lives
+        dpi; int, default 150
+            resolution for saved pictures
+    """
+
+    status.step("Beginning to Plot bandit assays")
+
+
+    # intitate a empty list to capture the results
+    saved_paths  = []
+
+    # Create the directory that will be writen to
+    out_dir = Path(root_path, "indv_bandit_plots")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    
+    # iterate through all the df's within the list 
+    for fed in fed_list:
+
+
+        df = fed.copy()
+        full_name = getattr(df, 'name', f"File_{fed}")
+        file_basename = os.path.basename(str(full_name))
+
+        # Preserve original index once
+        if "Original_Timestamp" not in df.columns:
+            df["Original_Timestamp"] = df.index
+
+        # Attach metadata by filename (matching already done upstream)
+        meta_row = None
+        if 'filename' in metadata_df.columns:
+            mr = metadata_df.loc[metadata_df['filename'] == file_basename]
+            if not mr.empty:
+                meta_row = mr.iloc[0]
+        if meta_row is not None:
+            for col in meta_row.index:
+                if col == 'filename':
+                    continue
+                if col not in df.columns:
+                    df[col] = meta_row[col]
+                else:
+                    if pd.isna(df[col]).all() and pd.notna(meta_row[col]):
+                        df[col] = meta_row[col]
+
+        # Time + cleanup
+        try:
+            df['timestamp'] = pd.to_datetime(df.index)
+        except Exception:
+            df['timestamp'] = np.arange(len(df))
+
+        _coerce_numeric_col(df, 'Poke_Time', clip_upper=2)
+        _coerce_numeric_col(df, 'Retrieval_Time', na_map={"Timed_out": np.nan})
+
+        if len(df) == 0:
+            status.warn(f"[!] Empty dataframe for {file_basename}. Skipping plot.")
+            #return None, None
+            continue
+
+        # Behavioral traces (needs fed3bandit as f3b)
+        
+        true_left = fed3bandit_extracted.true_probs(df, offset=5)[0]
+        mouse_left = fed3bandit_extracted.binned_paction(df, window=10)
+        #true_left = f3b.true_probs(df, offset=5)[0]
+        #mouse_left = f3b.binned_paction(df, window=10)
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(10, 3))
+        ax.plot(np.arange(len(true_left)), true_left, color="black", linewidth=2, alpha=0.5)
+
+        color = "dodgerblue"
+        if 'Sex' in df.columns and pd.notna(df['Sex']).any():
+            try:
+                color = "red" if str(df['Sex'].iloc[0]).strip().lower().startswith("f") else "dodgerblue"
+            except Exception:
+                pass
+        ax.plot(np.arange(len(mouse_left)), mouse_left, color=color, linewidth=3, alpha=0.7)
+
+        ax.set_ylabel("P(Left)")
+        ax.set_xlabel("Trial")
+        ax.set_yticks([1, 0.5, 0])
+
+        # Title = Mouse_ID (fallback to filename)
+        title_text = str(meta_row['Mouse_ID']) if (meta_row is not None and 'Mouse_ID' in meta_row and pd.notna(meta_row['Mouse_ID'])) else file_basename
+        ax.set_title(title_text)
+
+        sns.despine()
+        plt.tight_layout()
+        #plt.show()
+
+        # suggest a base filename for saving
+        safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title_text)
+        suggested = f"{safe_title}_pLeft"
+
+        out_path = out_dir / suggested
+        
+        
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+
+        # Close the current figure to save memory
+        plt.close(fig)
+
+        saved_paths.append(out_path)
+        status.ok(f"saved {out_path.name}")
+
+
+    status.sub(f"Plots saved to: {out_dir} ")
+
+    # return final results
+    return saved_paths 
+
+
+
+# ================================================================= Build Bandit L3  ================================================================= #
+### ------ General Helper functions ------ ###
+def _clean_colname(c):
+    """
+    Cleans column name, called typiclly within a loop to clean all columnnames 
+    Called by:
+        build_bandit_metakey
+    Argument:
+        c; string
+            string of column name
+    """
+    c = str(c).strip()
+    c = c.replace("$", "")
+    c = re.sub(r"\s+", "_", c)
+    c = re.sub(r"_+", "_", c)
+    return c
+
+
+def _basename(pathlike) -> str:
+    """
+    Argument:
+        pathlike; string
+            string of path
+    Returns:
+        basename from a path
+    """
+    s = str(pathlike).replace("\\", "/")
+    return s.split("/")[-1]
+
+def _file_base_lower(pathlike):
+    """
+    Returns pathname to all lowercase
+    
+    Argument:
+        pathlike; string
+            string of path
+    """
+    return os.path.splitext(os.path.basename(str(pathlike)))[0].lower()
+
+
+def _safe_col(df, candidates):
+    norm = lambda s: str(s).strip().lower().replace('-', '_').replace(' ', '_')
+    lmap = {norm(c): c for c in df.columns}
+    for cand in candidates:
+        key = norm(cand)
+        if key in lmap:
+            return lmap[key]
+    return None
+
+
+def _prep_events(df):
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None:
+        return df.iloc[0:0].copy(), None
+    return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
+
+
+def _get_timestamp_series(df, ts_col="MM:DD:YYYY hh:mm:ss"):
+    if ts_col in df.columns:
+        ts = pd.to_datetime(df[ts_col], format="%m:%d:%Y %H:%M:%S", errors="coerce")
+        return pd.Series(ts, index=df.index)
+    for cand in ["DateTime", "Datetime", "Timestamp", "timestamp", "datetime"]:
+        if cand in df.columns:
+            ts = pd.to_datetime(df[cand], errors="coerce")
+            return pd.Series(ts, index=df.index)
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex):
+        return pd.Series(idx, index=df.index)
+    return pd.to_datetime(pd.Series(idx, index=df.index), errors="coerce")
+
+
+def _split_day_night(df, ts_col="MM:DD:YYYY hh:mm:ss"):
+    """Day: 07:00–19:00; Night: otherwise."""
+    ts = _get_timestamp_series(df, ts_col=ts_col)
+    valid = ts.notna()
+    hrs = ts.dt.hour
+    day_mask = valid & (hrs >= 7) & (hrs < 19)
+    night_mask = valid & ~day_mask
+    return df.loc[day_mask], df.loc[night_mask]
+
+
+def compute_withinbout_lose_shift(c_df, max_gap_s=120):
+    try:
+        if "Event" not in c_df.columns or len(c_df) < 2:
+            return np.nan
+        events = c_df["Event"].to_numpy()
+        times = _get_timestamp_series(c_df).to_numpy()
+        total = shifted = 0
+        for i in range(len(events) - 1):
+            curr_evt, next_evt = events[i], events[i + 1]
+            if curr_evt not in ("Left", "Right"):
+                continue
+            dt_s = (times[i + 1] - times[i]) / np.timedelta64(1, "s")
+            if np.isnan(dt_s) or dt_s > max_gap_s:
+                continue
+            if next_evt == "Pellet":
+                continue
+            if next_evt in ("Left", "Right"):
+                total += 1
+                if next_evt != curr_evt:
+                    shifted += 1
+        return (shifted / total) if total > 0 else np.nan
+    except Exception:
+        return np.nan
+    
+
+def compute_withinbout_win_stay(c_df, max_gap_s=120):
+    try:
+        if "Event" not in c_df.columns or len(c_df) < 3:
+            return np.nan
+        events = c_df["Event"].to_numpy()
+        times = _get_timestamp_series(c_df).to_numpy()
+        pellet_idx = [i for i in range(1, len(events) - 1) if events[i] == "Pellet"]
+        total = same = 0
+        for i in pellet_idx:
+            prev_event, next_event = events[i - 1], events[i + 1]
+            dt_s = (times[i + 1] - times[i]) / np.timedelta64(1, "s")
+            if not np.isnan(dt_s) and dt_s <= max_gap_s:
+                if prev_event in ("Left", "Right") and next_event in ("Left", "Right"):
+                    total += 1
+                    if next_event == prev_event:
+                        same += 1
+        return (same / total) if total > 0 else np.nan
+    except Exception:
+        return np.nan
+    
+
+def compute_peak_accuracy(c_df):
+    try:
+        rev_avg = f3b.reversal_peh(c_df, (-10, 10), True)
+        if len(rev_avg) == 0:
+            return np.nan
+        return float(np.mean(rev_avg[:10])) if len(rev_avg) >= 10 else float(np.mean(rev_avg))
+    except Exception:
+        return np.nan
+
+def estimate_daily_pellets(c_df):
+    ts = _get_timestamp_series(c_df)
+    valid_ts = ts.dropna()
+    if valid_ts.size < 2:
+        return np.nan
+    duration_hours = (valid_ts.max() - valid_ts.min()).total_seconds() / 3600.0
+    if duration_hours <= 0:
+        return np.nan
+
+    pellet_events = np.nan
+    if "Pellet_Count" in c_df.columns and c_df["Pellet_Count"].notna().any():
+        pc = pd.to_numeric(c_df["Pellet_Count"], errors="coerce")
+        if pc.notna().any():
+            diffs = pc.diff().fillna(0).clip(lower=0)
+            pellet_events = float(diffs.sum())
+            if pellet_events == 0 and pc.iloc[-1] >= pc.iloc[0]:
+                pellet_events = float(pc.iloc[-1] - pc.iloc[0])
+    if (pd.isna(pellet_events)) and ("Event" in c_df.columns):
+        pellet_events = float((c_df["Event"] == "Pellet").sum())
+
+    if pd.isna(pellet_events):
+        return np.nan
+    return (pellet_events / duration_hours) * 24.0
+
+
+def compute_inactive_pokes(c_df):
+    try:
+        if not all(col in c_df.columns for col in ['Event', 'High_prob_poke']):
+            return np.nan
+        pokes = c_df[c_df['Event'].isin(['Left', 'Right'])].copy()
+        if pokes.empty:
+            return 0
+        inactive = pokes[pokes['Event'] != pokes['High_prob_poke']]
+        return len(inactive)
+    except Exception:
+        return np.nan
+
+def compute_active_pokes(c_df):
+    try:
+        if not all(col in c_df.columns for col in ['Event', 'High_prob_poke']):
+            return np.nan
+        pokes = c_df[c_df['Event'].isin(['Left', 'Right'])].copy()
+        if pokes.empty:
+            return 0
+        active = pokes[pokes['Event'] == pokes['High_prob_poke']]
+        return len(active)
+    except Exception:
+        return np.nan
+    
+
+### ------ Create bandit firendly key ------ ### 
+def build_bandit_metakey(key_df):
+    metadata_df = key_df.copy().reset_index(drop=True)
+    # Clean every column name
+    metadata_df.columns = [_clean_colname(c) for c in metadata_df.columns]
+    
+    if "filename" in metadata_df.columns:
+        metadata_df["filename"] = metadata_df["filename"].astype(str).map(os.path.basename).map(_basename)
+    if "Mouse_ID" in metadata_df.columns:
+        metadata_df["Mouse_ID"] = metadata_df["Mouse_ID"].astype(str).str.strip()
+    
+    wanted7 = ["Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", "Condition","Pellets","Litter", "Sire_Geno", "Dam_Geno",]
+    
+    lower_map = {c.lower(): c for c in metadata_df.columns}
+    rename_map = {}
+    for w in wanted7:
+        c = lower_map.get(w.lower(), None)
+        if c is not None and c != w:
+            rename_map[c] = w
+    metadata_df = metadata_df.rename(columns=rename_map)
+    
+    merge_cols = [c for c in ["filename", "Mouse_ID"] if c in metadata_df.columns]
+    naming_cols = [c for c in ["Session_type", "Gene_ID", "Strain_ID"] if c in metadata_df.columns]
+    keep_cols = list(dict.fromkeys(merge_cols + [c for c in wanted7 if c in metadata_df.columns] + naming_cols))
+    metadata_df = metadata_df.loc[:, keep_cols].copy()
+    
+    md = metadata_df.copy()
+    if "filename" in md.columns:
+        md["filename"] = md["filename"].astype(str).map(_basename)
+    if "Mouse_ID" in md.columns:
+        md["Mouse_ID"] = md["Mouse_ID"].astype(str).str.strip()
+
+    return md
+
+
+def pick_match_method(metch_mode=None):
+    """
+    Picks what the id key column is from the metadata df
+    Argument:
+        match_mode; str, default None
+            accepts string argument specifying what column will be used as the id column. should be either mouse_id or filename
+
+    Returns:
+        two strings identifying the main id and the backup id
+    """
+    
+    if match_mode == 'filename':
+        id_col = 'filename'
+    elif match_mode == 'mouse_id':
+        id_col = 'Mouse_ID'
+    else:
+        id_col = 'Mouse_ID' if 'Mouse_ID' in md.columns else 'filename'
+
+    other_id = "Mouse_ID" if id_col == "filename" else "filename"
+
+    return id_col, other_id
