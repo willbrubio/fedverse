@@ -1,0 +1,2415 @@
+
+
+# In[ ]:
+
+
+# @title Analyze FR1 metrics
+
+import os
+import re
+import numpy as np
+import pandas as pd
+import ipywidgets as widgets
+from IPython.display import display, clear_output, HTML
+from datetime import datetime
+
+files_list = feds
+assert isinstance(files_list, list) and len(files_list) > 0, "No FED3 files loaded."
+assert 'Key_Df' in globals() and isinstance(Key_Df, pd.DataFrame), "Build/rematch Key_Df first."
+
+# =============================================================================
+# 0) Build CLEAN metadata_df from Key_Df (keep what we need for merging + naming)
+# =============================================================================
+
+def _clean_colname(c):
+    c = str(c).strip()
+    c = c.replace("$", "")
+    c = re.sub(r"\s+", "_", c)
+    c = re.sub(r"_+", "_", c)
+    return c
+
+def _basename(pathlike) -> str:
+    s = str(pathlike).replace("\\", "/")
+    return s.split("/")[-1]
+
+# Start from Key_Df
+metadata_df = Key_Df.copy().reset_index(drop=True)
+metadata_df.columns = [_clean_colname(c) for c in metadata_df.columns]
+
+# Normalize filename values if present
+if "filename" in metadata_df.columns:
+    metadata_df["filename"] = metadata_df["filename"].astype(str).map(os.path.basename).map(_basename)
+
+# Normalize Mouse_ID values if present
+if "Mouse_ID" in metadata_df.columns:
+    metadata_df["Mouse_ID"] = metadata_df["Mouse_ID"].astype(str).str.strip()
+
+# Your requested 7 fields (after cleaning $ etc.)
+wanted7 = ["Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", "Condition","Task"]
+
+# Canonicalize casing for wanted7 if they exist with different case
+lower_map = {c.lower(): c for c in metadata_df.columns}
+rename_map = {}
+for w in wanted7:
+    c = lower_map.get(w.lower(), None)
+    if c is not None and c != w:
+        rename_map[c] = w
+metadata_df = metadata_df.rename(columns=rename_map)
+
+# Keep columns needed:
+# - for merging: filename and/or Mouse_ID (keep both if present; we will drop extras at export)
+# - for your 7 fields
+# - for filename generation at end: Gene_ID / Strain_ID / Session_type if present
+always_for_merge = [c for c in ["filename", "Mouse_ID"] if c in metadata_df.columns]
+always_for_naming = [c for c in ["Session_type", "Gene_ID", "Strain_ID"] if c in metadata_df.columns]
+keep_cols = list(dict.fromkeys(always_for_merge + [c for c in wanted7 if c in metadata_df.columns] + always_for_naming))
+metadata_df = metadata_df.loc[:, keep_cols].copy()
+
+assert isinstance(metadata_df, pd.DataFrame) and len(metadata_df) > 0, "metadata_df construction failed."
+
+# =============================================================================
+# 1) Helper functions (unchanged)
+# =============================================================================
+
+def _get_sessions():
+    if 'feds' in globals() and isinstance(feds, (list, tuple)) and len(feds) > 0:
+        return list(feds)
+    raise RuntimeError("No FED3 sessions found. Expecting a non-empty 'feds' list.")
+
+def _safe_col(df, candidates):
+    norm = lambda s: str(s).strip().lower().replace('-', '_').replace(' ', '_')
+    lmap = {norm(c): c for c in df.columns}
+    for cand in candidates:
+        key = norm(cand)
+        if key in lmap:
+            return lmap[key]
+    return None
+
+def _prep_events(df):
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None:
+        return df.iloc[0:0].copy(), None
+    return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
+
+def _pellet_times_from_df(df):
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None:
+        return []
+    pel = df[df[ev_col] == "Pellet"]
+    if isinstance(pel.index, pd.DatetimeIndex):
+        ts = pel.index.to_series()
+    else:
+        for cand in ["MM:DD:YYYY hh:mm:ss", "DateTime", "Datetime", "Timestamp", "timestamp", "datetime"]:
+            if cand in pel.columns:
+                ts = pd.to_datetime(pel[cand], errors="coerce")
+                break
+        else:
+            ts = pd.to_datetime(pel.index, errors="coerce")
+    ts = ts.dropna().sort_values()
+    return ts.to_list()
+
+def _get_ts_series_from_col_or_index(df, ts_candidates=("MM:DD:YYYY hh:mm:ss","DateTime","Datetime","Timestamp","timestamp","datetime")):
+    for cand in ts_candidates:
+        if cand in df.columns:
+            ts = pd.to_datetime(df[cand], errors="coerce")
+            if not isinstance(ts, pd.Series):
+                ts = pd.Series(ts, index=df.index)
+            else:
+                ts = ts.reindex(df.index)
+            return ts
+    if isinstance(df.index, pd.DatetimeIndex):
+        return pd.Series(df.index, index=df.index)
+    return pd.to_datetime(pd.Series(df.index, index=df.index), errors="coerce")
+
+def _split_day_night_masks(ts):
+    valid = ts.notna()
+    hrs = ts.dt.hour
+    day_mask = valid & (hrs >= 6) & (hrs < 18)
+    night_mask = valid & ~day_mask
+    return day_mask, night_mask
+
+def _cluster_times(ts_list, max_interval_sec=60):
+    if not ts_list:
+        return []
+    clusters, current = [], [ts_list[0]]
+    for i in range(1, len(ts_list)):
+        if (ts_list[i] - ts_list[i-1]).total_seconds() <= max_interval_sec:
+            current.append(ts_list[i])
+        else:
+            clusters.append(current); current = [ts_list[i]]
+    clusters.append(current)
+    return clusters
+
+def _within_meal_ipi_mean_from_pellet_times(ts_list, max_interval_sec=60, min_meal_size=3, weighted=False):
+    """
+    Mean inter-pellet interval (seconds) computed ONLY within meals:
+      - meal = cluster of pellets where successive pellets are <= max_interval_sec apart
+      - meal must have at least min_meal_size pellets (default 3)
+    If weighted=False: average the per-meal means (each meal counts equally).
+    If weighted=True: average all within-meal IPIs pooled (meals weighted by (meal_size-1)).
+    """
+    if not ts_list or len(ts_list) < 2:
+        return np.nan
+
+    clusters = _cluster_times(ts_list, max_interval_sec=max_interval_sec)
+    meal_clusters = [c for c in clusters if len(c) >= min_meal_size]
+    if not meal_clusters:
+        return np.nan
+
+    meal_means = []
+    pooled_ipis = []
+
+    for c in meal_clusters:
+        ipis = np.diff([t.timestamp() for t in c])  # seconds
+        ipis = ipis[(ipis > 0) & (ipis <= max_interval_sec)]  # safety clamp to within-meal definition
+        if ipis.size == 0:
+            continue
+        meal_means.append(float(np.mean(ipis)))
+        pooled_ipis.extend(ipis.tolist())
+
+    if weighted:
+        return float(np.mean(pooled_ipis)) if len(pooled_ipis) else np.nan
+    else:
+        return float(np.mean(meal_means)) if len(meal_means) else np.nan
+
+def _subset_meal_metrics(df, ts_series, max_interval_sec=60):
+    out = {
+        "%MealPellets": np.nan,
+        "%GrazingPellets": np.nan,
+        "Pellets": 0,
+        "NumMeals": np.nan,
+        "AvgMealSize": np.nan,
+        "AvgMealDuration": np.nan,
+        "MealsPerHour": np.nan,
+        "Accuracy": np.nan,
+    }
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None or df.empty:
+        return out
+
+    left_n = int((df[ev_col] == "Left").sum())
+    right_n = int((df[ev_col] == "Right").sum())
+    denom = left_n + right_n
+    if denom > 0:
+        out["Accuracy"] = 100.0 * (left_n / denom)
+
+    pel_mask = (df[ev_col] == "Pellet")
+    pel_ts = ts_series[pel_mask].dropna().sort_values()
+    out["Pellets"] = int(pel_ts.size)
+    if pel_ts.size == 0:
+        return out
+
+    ts_list = pel_ts.to_list()
+    clusters = _cluster_times(ts_list, max_interval_sec=max_interval_sec)
+    meal_clusters = [c for c in clusters if len(c) >= 3]
+    grazing_clusters = [c for c in clusters if 1 <= len(c) < 3]
+
+    meal_pellets = sum(len(c) for c in meal_clusters)
+    grazing_pellets = sum(len(c) for c in grazing_clusters)
+    total_pg = meal_pellets + grazing_pellets
+    if total_pg > 0:
+        out["%MealPellets"] = 100.0 * meal_pellets / total_pg
+        out["%GrazingPellets"] = 100.0 * grazing_pellets / total_pg
+
+    if len(meal_clusters) > 0:
+        out["NumMeals"] = float(len(meal_clusters))
+        out["AvgMealSize"] = float(np.mean([len(c) for c in meal_clusters]))
+        out["AvgMealDuration"] = float(np.mean([(c[-1] - c[0]).total_seconds() for c in meal_clusters]))
+    else:
+        out["NumMeals"] = 0.0
+
+    if len(ts_list) >= 2:
+        rec_hours = (ts_list[-1] - ts_list[0]).total_seconds() / 3600.0
+        if rec_hours > 0:
+            out["MealsPerHour"] = (out["NumMeals"] / rec_hours) if np.isfinite(out["NumMeals"]) else np.nan
+    return out
+
+def _estimate_daily_pellets(df):
+    ts = _get_ts_series_from_col_or_index(df)
+    ts = ts.dropna().sort_values()
+    if ts.size < 2:
+        return np.nan
+    duration_hours = (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 3600.0
+    if duration_hours <= 0:
+        return np.nan
+
+    pellet_events = np.nan
+    pc_col = _safe_col(df, ["Pellet_Count", "pellet_count"])
+    if pc_col is not None:
+        pc = pd.to_numeric(df[pc_col], errors='coerce')
+        if pc.notna().any():
+            diffs = pc.diff().fillna(0).clip(lower=0)
+            pellet_events = float(diffs.sum())
+            if pellet_events == 0 and pc.iloc[-1] >= pc.iloc[0]:
+                pellet_events = float(pc.iloc[-1] - pc.iloc[0])
+
+    if np.isnan(pellet_events):
+        ev_col = _safe_col(df, ["Event", "event"])
+        if ev_col is not None:
+            pellet_events = float((df[ev_col] == "Pellet").sum())
+
+    if np.isnan(pellet_events):
+        return np.nan
+    return (pellet_events / duration_hours) * 24.0
+
+# =============================================================================
+# 2) Load sessions
+# =============================================================================
+
+_sessions = _get_sessions()
+
+# Use md as the cleaned key table
+md = metadata_df.copy()
+
+# Ensure filename is basenames if present
+if "filename" in md.columns:
+    md["filename"] = md["filename"].astype(str).map(_basename)
+
+# =============================================================================
+# 3) Core FR1 metrics per file
+# =============================================================================
+
+rows = []
+for idx, c_df in enumerate(_sessions):
+    file_name = _basename(getattr(c_df, "name", f"File_{idx}"))
+    d, ev = _prep_events(c_df)
+
+    if ev is None or d.empty:
+        pellets = left = right = lwp = 0
+        rt_med = ipi_med = pt_med = np.nan
+    else:
+        pellets = int((d[ev] == "Pellet").sum())
+        left    = int((d[ev] == "Left").sum())
+        right   = int((d[ev] == "Right").sum())
+        lwp     = int((c_df[ev] == "LeftWithPellet").sum()) if ev in c_df.columns else 0
+
+        rt_col  = _safe_col(d, ["Retrieval_Time", "retrieval_time"])
+        pt_col  = _safe_col(d, ["Poke_Time", "poke_time"])
+
+        rt_med  = pd.to_numeric(d.get(rt_col, pd.Series(dtype=float)), errors="coerce").median() if rt_col else np.nan
+        pt_med  = pd.to_numeric(d.get(pt_col, pd.Series(dtype=float)), errors="coerce").median() if pt_col else np.nan
+
+        # Mean IPI within meals only (exclude grazing clusters of <3 pellets)
+        pellet_ts_list = _pellet_times_from_df(c_df)
+        ipi_med = _within_meal_ipi_mean_from_pellet_times(
+            pellet_ts_list,
+            max_interval_sec=60,
+            min_meal_size=3,
+            weighted=False,   # set True if you want larger meals to contribute more
+        )
+
+    total_pokes = left + right
+    acc = (left / total_pokes * 100.0) if total_pokes > 0 else np.nan
+    ppp = (total_pokes / pellets) if pellets > 0 else np.nan
+    daily_pel = _estimate_daily_pellets(c_df)
+
+    rows.append({
+        "File": file_name,
+        "FileIndex": idx,
+        "Pellets": pellets,
+        "Left_Poke": left,
+        "Right_Poke": right,
+        "Total_Pokes": total_pokes,
+        "Accuracy": acc,
+        "PokesPerPellet": ppp,
+        "RetrievalTime": rt_med,
+        "InterPelletInterval": ipi_med,
+        "PokeTime": pt_med,
+        "Daily_Pellets": daily_pel,
+        "Left Poke with Pellet": lwp,
+    })
+
+FR1metrics = pd.DataFrame(rows)
+if FR1metrics.empty:
+    display(HTML("<b style='color:#b00'>No files to analyze.</b>"))
+    raise SystemExit
+
+# =============================================================================
+# 4) Meal/grazing metrics
+# =============================================================================
+
+def compute_within_meal_mode_from_sessions(sessions, max_interval_sec=60, min_samples=5):
+    rows = []
+    try:
+        from scipy.stats import gaussian_kde
+        use_kde = True
+    except Exception:
+        use_kde = False
+
+    for i, df in enumerate(sessions):
+        file = _basename(getattr(df, "name", f"File_{i}"))
+        ipi_col = _safe_col(df, ["InterPelletInterval", "interpelletinterval", "inter_pellet_interval"])
+        if ipi_col is None or df.empty:
+            rows.append({"File": file, "Within_meal_pellet_rate": np.nan}); continue
+
+        vals = pd.to_numeric(df[ipi_col], errors="coerce").dropna()
+        vals = vals[(vals > 0) & (vals <= max_interval_sec)]
+        if vals.size < min_samples:
+            rows.append({"File": file, "Within_meal_pellet_rate": np.nan}); continue
+
+        logv = np.log10(vals.values)
+
+        if use_kde:
+            kde = gaussian_kde(logv, bw_method="scott")
+            xs  = np.linspace(logv.min(), logv.max(), 1000)
+            ys  = kde(xs)
+            peak_log10 = xs[np.argmax(ys)]
+        else:
+            xs = np.linspace(logv.min(), logv.max(), 256)
+            hist, edges = np.histogram(logv, bins=xs)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            peak_log10 = centers[np.argmax(hist)]
+
+        peak_seconds = float(10.0 ** peak_log10)
+        rows.append({"File": file, "Within_meal_pellet_rate": peak_seconds})
+
+    return pd.DataFrame(rows)
+
+def compute_meal_bout_metrics_from_sessions(sessions, max_interval_sec=60):
+    rows, recinfo = [], []
+    for i, df in enumerate(sessions):
+        file = _basename(getattr(df, "name", f"File_{i}"))
+        ts = _pellet_times_from_df(df)
+        if len(ts) < 2:
+            continue
+        duration_hr = (ts[-1] - ts[0]).total_seconds() / 3600.0
+        recinfo.append({"File": file, "RecordingHours": duration_hr})
+
+        clusters = _cluster_times(ts, max_interval_sec=max_interval_sec)
+        meal_id = 0
+        for c in clusters:
+            if len(c) >= 3:
+                rows.append({
+                    "File": file,
+                    "MealID": meal_id,
+                    "MealSize": len(c),
+                    "MealDuration_sec": (c[-1] - c[0]).total_seconds(),
+                })
+                meal_id += 1
+    meal_df = pd.DataFrame(rows)
+    rec_df  = pd.DataFrame(recinfo)
+    if meal_df.empty:
+        out = pd.DataFrame(columns=["File","NumMeals","AvgMealSize","AvgMealDuration","RecordingHours","MealsPerHour"])
+    else:
+        out = (meal_df.groupby("File")
+               .agg(NumMeals=("MealID","count"), AvgMealSize=("MealSize","mean"), AvgMealDuration=("MealDuration_sec","mean"))
+               .reset_index())
+    out = out.merge(rec_df, on="File", how="left")
+    out["MealsPerHour"] = out["NumMeals"] / out["RecordingHours"]
+    return out
+
+def compute_meal_pellet_distribution_from_sessions(sessions, max_interval_sec=60):
+    rows = []
+    for i, df in enumerate(sessions):
+        file = _basename(getattr(df, "name", f"File_{i}"))
+        ts = _pellet_times_from_df(df)
+        if len(ts) == 0:
+            rows.append({"File": file, "%MealPellets": np.nan, "%GrazingPellets": np.nan})
+            continue
+        clusters = _cluster_times(ts, max_interval_sec=max_interval_sec)
+        meal_pellets    = sum(len(c) for c in clusters if len(c) >= 3)
+        grazing_pellets = sum(len(c) for c in clusters if 1 <= len(c) < 3)
+        total = meal_pellets + grazing_pellets
+        rows.append({
+            "File": file,
+            "%MealPellets": (100 * meal_pellets / total) if total else np.nan,
+            "%GrazingPellets": (100 * grazing_pellets / total) if total else np.nan
+        })
+    return pd.DataFrame(rows)
+
+meal_info_df   = compute_meal_bout_metrics_from_sessions(_sessions, max_interval_sec=60)
+pellet_dist_df = compute_meal_pellet_distribution_from_sessions(_sessions, max_interval_sec=60)
+
+FR1_enriched = (
+    FR1metrics
+    .merge(pellet_dist_df, on="File", how="left")
+    .merge(meal_info_df, on="File", how="left")
+)
+
+wmpr_df = compute_within_meal_mode_from_sessions(_sessions, max_interval_sec=60, min_samples=5)
+FR1_enriched = FR1_enriched.merge(wmpr_df, on="File", how="left")
+
+# =============================================================================
+# 5) Day/Night metrics
+# =============================================================================
+
+_day_night_bases = ["%MealPellets","%GrazingPellets","Pellets","NumMeals","AvgMealSize","AvgMealDuration","MealsPerHour","Accuracy"]
+for base in _day_night_bases:
+    FR1_enriched[f"{base}_Day"] = np.nan
+    FR1_enriched[f"{base}_Night"] = np.nan
+
+for i, df_all in enumerate(_sessions):
+    file = _basename(getattr(df_all, "name", f"File_{i}"))
+    ts_all = _get_ts_series_from_col_or_index(df_all)
+    day_mask, night_mask = _split_day_night_masks(ts_all)
+
+    day_df = df_all.loc[day_mask]
+    night_df = df_all.loc[night_mask]
+
+    day_vals = _subset_meal_metrics(day_df, ts_all.loc[day_mask])
+    night_vals = _subset_meal_metrics(night_df, ts_all.loc[night_mask])
+
+    row_mask = FR1_enriched["File"] == file
+    for base in _day_night_bases:
+        FR1_enriched.loc[row_mask, f"{base}_Day"] = day_vals[base]
+        FR1_enriched.loc[row_mask, f"{base}_Night"] = night_vals[base]
+
+# =============================================================================
+# 6) Attach metadata (robust: can work whether you “match” by filename or Mouse_ID)
+# =============================================================================
+
+# Decide match key for OUTPUT (your KEY_MATCH_MODE)
+match_mode = globals().get('KEY_MATCH_MODE', None)
+if match_mode == 'filename':
+    id_col = 'filename'
+elif match_mode == 'mouse_id':
+    id_col = 'Mouse_ID'
+else:
+    # fallback output ID
+    id_col = 'Mouse_ID' if 'Mouse_ID' in md.columns else 'filename'
+
+# Normalize a filename key in FR1_enriched for merging if possible
+FR1_enriched["filename"] = FR1_enriched["File"].astype(str).map(_basename)
+
+# If we have filename<->Mouse_ID in md, populate Mouse_ID from filename mapping (helps even if output is mouse_id)
+if "filename" in md.columns and "Mouse_ID" in md.columns:
+    mouse_map = md.dropna(subset=["filename"]).drop_duplicates("filename").set_index("filename")["Mouse_ID"]
+    FR1_enriched["Mouse_ID"] = FR1_enriched["filename"].map(mouse_map)
+
+# Build a single md_unique for merging:
+# - prefer Mouse_ID merge when Mouse_ID exists in both and is populated
+fm = FR1_enriched.copy()
+
+if "Mouse_ID" in fm.columns and "Mouse_ID" in md.columns and fm["Mouse_ID"].notna().any():
+    md_mouse_unique = md.drop_duplicates(subset=["Mouse_ID"], keep="first")
+    fm = fm.merge(md_mouse_unique, on="Mouse_ID", how="left", suffixes=("", "_md"))
+
+# Fallback/secondary merge by filename for any rows still missing the 7 fields
+need_cols = [c for c in wanted7 if c in md.columns]
+if "filename" in md.columns and need_cols:
+    missing_any = fm[need_cols].isna().all(axis=1) if all(c in fm.columns for c in need_cols) else pd.Series([True]*len(fm))
+    if missing_any.any():
+        md_file_unique = md.drop_duplicates(subset=["filename"], keep="first")
+        fb = fm.loc[missing_any].drop(columns=[c for c in md_file_unique.columns if c in fm.columns and c != "filename"], errors="ignore")
+        fb = fb.merge(md_file_unique, on="filename", how="left", suffixes=("", "_md"))
+        fm.loc[missing_any, fb.columns] = fb.values
+
+# =============================================================================
+# 7) Session-type suffixing (unchanged)
+# =============================================================================
+
+metric_cols_all = [
+    "Pellets", "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy",
+    "PokesPerPellet", "RetrievalTime", "InterPelletInterval", "PokeTime",
+    "%MealPellets", "%GrazingPellets", "NumMeals", "AvgMealSize",
+    "AvgMealDuration", "RecordingHours", "MealsPerHour",
+    "Daily_Pellets", "Left Poke with Pellet","Within_meal_pellet_rate",
+    "%MealPellets_Day","%GrazingPellets_Day","Pellets_Day","NumMeals_Day","AvgMealSize_Day","AvgMealDuration_Day","MealsPerHour_Day","Accuracy_Day",
+    "%MealPellets_Night","%GrazingPellets_Night","Pellets_Night","NumMeals_Night","AvgMealSize_Night","AvgMealDuration_Night","MealsPerHour_Night","Accuracy_Night",
+]
+
+if 'Session_type' in fm.columns:
+    session_series = fm['Session_type'].astype(str).str.strip()
+else:
+    sess_map = {
+        _basename(getattr(_sessions[i], "name", f"File_{i}")):
+        (_sessions[i].attrs.get("Session_type") or "Unknown")
+        for i in range(len(_sessions))
+    }
+    session_series = fm["File"].map(sess_map).fillna("Unknown").astype(str)
+
+session_series = session_series.str.replace(r"\s+", "_", regex=True)
+fm["_Session_type_for_csv"] = session_series
+
+def with_session_suffix_for_csv(df, metrics=metric_cols_all, session_col="_Session_type_for_csv"):
+    df = df.copy()
+    for m in metrics:
+        if m not in df.columns:
+            continue
+        for sess in df[session_col].dropna().unique():
+            mask = df[session_col] == sess
+            col_name = f"{m}_{sess}"
+            if col_name not in df.columns:
+                df[col_name] = np.nan
+            df.loc[mask, col_name] = df.loc[mask, m]
+        df.drop(columns=[m], inplace=True)
+    return df.drop(columns=[session_col])
+
+FR1metrics_merged = fm.copy()
+FR1metrics_csv    = with_session_suffix_for_csv(FR1metrics_merged)
+
+# =============================================================================
+# 8) FINAL EXPORT: ONLY [match key] + 7 key fields + metrics (NO File/FileIndex, NO duplicate IDs)
+# =============================================================================
+
+def _metric_match(col):
+    return any(col.startswith(base + "_") for base in metric_cols_all)
+
+metric_keep = [c for c in FR1metrics_csv.columns if _metric_match(c)]
+if not metric_keep:
+    raise RuntimeError("No session-suffixed metric columns matched; check 'metric_cols_all'.")
+
+# Ensure output ID exists; if matching by filename, use filename; if mouse_id, use Mouse_ID
+if id_col not in FR1metrics_csv.columns:
+    raise ValueError(f"Output id_col '{id_col}' not found in FR1metrics_csv.")
+
+meta_keep = [c for c in wanted7 if c in FR1metrics_csv.columns]
+
+# Drop stuff you never want exported
+drop_cols = [c for c in ["File", "FileIndex"] if c in FR1metrics_csv.columns]
+other_id = "Mouse_ID" if id_col == "filename" else "filename"
+if other_id in FR1metrics_csv.columns:
+    drop_cols.append(other_id)
+
+FR1metrics_csv = FR1metrics_csv.drop(columns=drop_cols, errors="ignore")
+
+# Final column order
+cols_out = [id_col] + meta_keep + metric_keep
+cols_out = [c for c in cols_out if c in FR1metrics_csv.columns]
+FR1metrics_csv = FR1metrics_csv.loc[:, cols_out].copy()
+
+# =============================================================================
+# 9) Save & present (unchanged, but now uses cleaned merged metadata)
+# =============================================================================
+
+example = FR1metrics_merged.iloc[0]
+
+strain_name = str(example.get("Gene", example.get("Strain", "FR1"))).replace(" ", "_")
+
+strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "Metrics"))
+try:
+    strain_num = f"{int(strain_num_raw):03d}"
+except Exception:
+    strain_num = str(strain_num_raw).zfill(3)
+
+task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
+
+fname = f"{strain_name}_{strain_num}_{task_name}_L3.csv"
+
+FR1metrics_csv.to_csv(fname, index=False)
+display(HTML(f"<b>✓ Saved metrics CSV to:</b> <code>{fname}</code>"))
+
+# Download button
+btn = widgets.Button(
+    description=f"Download {os.path.basename(fname)}",
+    icon="download",
+    tooltip="Click to download the metrics CSV",
+    layout=widgets.Layout(width="auto"),
+)
+status = widgets.HTML()
+
+def _on_click(b):
+    clear_output(wait=True)
+    display(btn, status)
+    if not os.path.exists(fname):
+        status.value = f"<b style='color:#b00'>File not found:</b> {fname}"
+        return
+    try:
+        from google.colab import files as gfiles
+        status.value = f"Starting download: <code>{os.path.basename(fname)}</code>…"
+        gfiles.download(fname)
+    except Exception:
+        status.value = (
+            "Not running in Colab. File saved locally at:<br>"
+            f"<code>{fname}</code><br>"
+            "Use the link above to open it."
+        )
+
+display(btn, status)
+btn.on_click(_on_click)
+
+
+# In[ ]:
+
+
+# @title Group for plotting
+
+import os
+import numpy as np
+import pandas as pd
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+# --- sanity ---
+if 'metadata_df' not in globals() or metadata_df is None or metadata_df.empty:
+    raise RuntimeError("metadata_df is missing or empty. Build metadata_df (copy of Key_Df) first.")
+
+EXCLUDE_LOWER = {"match_status"}   # everything else is allowed
+
+def _build_file_column(df):
+    if "filename" in df.columns:
+        return df["filename"].apply(lambda p: os.path.basename(str(p)))
+    if "FED3_from_file" in df.columns and "Date_from_file" in df.columns:
+        return "FED" + df["FED3_from_file"].astype(str) + "_" + df["Date_from_file"].astype(str)
+    if "FED3_from_file" in df.columns:
+        return "FED" + df["FED3_from_file"].astype(str)
+    return df.index.astype(str)
+
+def _norm_val(x):
+    s = str(x).strip()
+    if s == "" or s.lower() in {"nan", "none"}:
+        return "UNK"
+    return s.upper()
+
+def _build_group_row(row, ordered_cols):
+    if not ordered_cols:
+        return "ALL"
+    return " ".join(_norm_val(row[c]) for c in ordered_cols)
+
+def build_mapping(ordered_cols):
+    _meta = metadata_df.copy()
+    _meta["File"] = _build_file_column(_meta)
+    _meta["Group"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols), axis=1)
+    mapping = (
+        _meta[["File", "Group"]]
+        .dropna(subset=["File"])
+        .drop_duplicates()
+        .sort_values(["Group", "File"])
+        .reset_index(drop=True)
+    )
+    return mapping
+
+def _unique_keep_order(seq):
+    seen = set(); out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x); out.append(x)
+    return out
+
+# ---------- UI (fixed sizes + grid) ----------
+PX_W = "260px"   # list box width
+PX_H = "160px"   # list box height
+BTN_W = "160px"  # button column width
+HDR_H = "28px"   # header cell height (consistent across all headers)
+
+title = widgets.HTML("<h3>Select columns to group by for X and Hue, then reorder X to set hierarchy</h3>")
+
+all_cols = sorted((c for c in metadata_df.columns if str(c).lower() not in EXCLUDE_LOWER), key=str.lower)
+
+def header(text):
+    # Normalize header height/margins so they align perfectly in the grid row
+    return widgets.HTML(
+        f"<div style='height:{HDR_H};display:flex;align-items:flex-end;'>"
+        f"<h4 style=\"margin:0;\">{text}</h4></div>"
+    )
+
+# Headers (row 1 of grid)
+available_hdr = header("Available")
+actions_hdr   = header("Actions")
+x_hdr         = header("X grouping")
+hue_hdr       = header("Hue grouping")
+
+# Widgets (row 2 of grid)
+available = widgets.SelectMultiple(
+    options=all_cols, value=tuple(), rows=14,
+    layout=widgets.Layout(
+        width=PX_W, height=PX_H, min_width=PX_W, max_width=PX_W,
+        min_height=PX_H, max_height=PX_H, flex="0 0 auto"
+    )
+)
+
+right_x = widgets.Select(
+    options=[], value=None, rows=8,
+    layout=widgets.Layout(
+        width=PX_W, height=PX_H, min_width=PX_W, max_width=PX_W,
+        min_height=PX_H, max_height=PX_H, flex="0 0 auto"
+    )
+)
+
+right_hue = widgets.Select(
+    options=[], value=None, rows=8,
+    layout=widgets.Layout(
+        width=PX_W, height=PX_H, min_width=PX_W, max_width=PX_W,
+        min_height=PX_H, max_height=PX_H, flex="0 0 auto"
+    )
+)
+
+# Buttons
+btn_add_x    = widgets.Button(description="Add to X ▶", button_style='primary', layout=widgets.Layout(width=BTN_W))
+btn_add_hue  = widgets.Button(description="Add to Hue ▶",button_style='primary', layout=widgets.Layout(width=BTN_W))
+btn_clear    = widgets.Button(description="Clear", button_style='danger', layout=widgets.Layout(width=BTN_W))
+btn_up       = widgets.Button(description="↑ Up (X only)", layout=widgets.Layout(width=BTN_W))
+btn_down     = widgets.Button(description="↓ Down (X only)", layout=widgets.Layout(width=BTN_W))
+btn_build    = widgets.Button(description="Build Groups", button_style='success', layout=widgets.Layout(width="160px"))
+
+controls_col = widgets.VBox(
+    [btn_add_x, btn_add_hue, btn_clear, btn_up, btn_down],
+    layout=widgets.Layout(
+        align_items="center",
+        width=BTN_W, min_width=BTN_W, max_width=BTN_W,
+        height=PX_H, min_height=PX_H, max_height=PX_H,
+        flex="0 0 auto"
+    )
+)
+
+btn_build = widgets.Button(description="Build Groups", button_style='success', layout=widgets.Layout(width="160px"))
+output = widgets.Output()
+
+# --- Callbacks ---
+def on_add_x(_):
+    sel = list(available.value)
+    if not sel: return
+    new_opts = _unique_keep_order(list(right_x.options) + sel)
+    right_x.value = None
+    right_x.options = new_opts
+    right_x.value = new_opts[-1] if new_opts else None
+
+def on_add_hue(_):
+    sel = list(available.value)
+    if not sel: return
+    new_opts = _unique_keep_order(list(right_hue.options) + sel)
+    right_hue.value = None
+    right_hue.options = new_opts
+    right_hue.value = new_opts[-1] if new_opts else None
+
+def on_clear(_):
+    right_x.value = None; right_x.options = []
+    right_hue.value = None; right_hue.options = []
+
+def on_up(_):
+    item = right_x.value
+    if item is None: return
+    opts = list(right_x.options)
+    i = opts.index(item)
+    if i > 0:
+        opts[i-1], opts[i] = opts[i], opts[i-1]
+        right_x.value = None; right_x.options = opts; right_x.value = item
+
+def on_down(_):
+    item = right_x.value
+    if item is None: return
+    opts = list(right_x.options)
+    i = opts.index(item)
+    if i < len(opts) - 1:
+        opts[i+1], opts[i] = opts[i], opts[i+1]
+        right_x.value = None; right_x.options = opts; right_x.value = item
+
+def on_build(_):
+    with output:
+        clear_output()
+        ordered_cols_x = list(right_x.options)
+        ordered_cols_hue = list(right_hue.options)
+
+        mapping_x = build_mapping(ordered_cols_x)
+        mapping_hue = build_mapping(ordered_cols_hue)
+
+        _meta = metadata_df.copy()
+        _meta["File"] = _build_file_column(_meta)
+        _meta["XGroup"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols_x), axis=1)
+        _meta["HueGroup"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols_hue), axis=1)
+        mapping_both = (
+            _meta[["File", "XGroup", "HueGroup"]]
+            .dropna(subset=["File"])
+            .drop_duplicates()
+            .sort_values(["XGroup", "HueGroup", "File"])
+            .reset_index(drop=True)
+        )
+
+        globals()['files_to_group_x'] = mapping_x.copy()
+        globals()['files_to_group_hue'] = mapping_hue.copy()
+        globals()['files_to_group_both'] = mapping_both.copy()
+        globals()['selected_group_cols_x'] = ordered_cols_x.copy()
+        globals()['selected_group_cols_hue'] = ordered_cols_hue.copy()
+
+        print("X-axis grouping (hierarchy):", ordered_cols_x if ordered_cols_x else ["ALL"])
+        print(f"Total unique files (X map): {mapping_x['File'].nunique()}")
+        display(widgets.HTML("<b>X-group summary</b>"))
+        display((mapping_x.groupby("Group", dropna=False)["File"]
+                 .nunique().sort_values(ascending=False)
+                 .rename("UniqueFiles").to_frame()))
+
+        print("\nHue grouping:", ordered_cols_hue if ordered_cols_hue else ["ALL"])
+        print(f"Total unique files (Hue map): {mapping_hue['File'].nunique()}")
+        display(widgets.HTML("<b>Hue-group summary</b>"))
+        display((mapping_hue.groupby("Group", dropna=False)["File"]
+                 .nunique().sort_values(ascending=False)
+                 .rename("UniqueFiles").to_frame()))
+        print("\nCombined mapping available as `files_to_group_both` (File, XGroup, HueGroup)")
+
+# Wire up
+btn_add_x.on_click(on_add_x)
+btn_add_hue.on_click(on_add_hue)
+btn_clear.on_click(on_clear)
+btn_up.on_click(on_up)
+btn_down.on_click(on_down)
+btn_build.on_click(on_build)
+
+# ----- Grid layout -----
+grid = widgets.GridBox(
+    children=[
+        available_hdr, actions_hdr, x_hdr, hue_hdr,     # row 1: headers
+        available,     controls_col, right_x, right_hue # row 2: widgets
+    ],
+    layout=widgets.Layout(
+        grid_template_columns=f"{PX_W} {BTN_W} {PX_W} {PX_W}",
+        grid_template_rows="auto auto",
+        grid_gap="6px 16px",
+        align_items="flex-start",
+        justify_items="flex-start",
+        width="100%"
+    )
+)
+
+ui = widgets.VBox([title, grid, widgets.HBox([btn_build]), output])
+display(ui)
+
+
+# In[ ]:
+
+
+#@title Plot metrics!
+import os, time, shutil, re, itertools
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+import pingouin as pg
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+
+try:
+    from google.colab import files as colab_files
+except Exception:
+    colab_files = None
+
+ALPHA = 0.6
+
+# -----------------------
+# 0) Preconditions & source
+# -----------------------
+if 'FR1metrics_merged' in globals() and FR1metrics_merged is not None and not FR1metrics_merged.empty:
+    bm = FR1metrics_merged.copy()
+elif 'FR1metrics' in globals() and FR1metrics is not None and not FR1metrics.empty:
+    bm = FR1metrics.copy()
+elif 'FR1metrics_csv' in globals() and FR1metrics_csv is not None and not FR1metrics_csv.empty:
+    bm = FR1metrics_csv.copy()
+else:
+    raise RuntimeError("No FR1 metrics DataFrame found: expected one of FR1metrics_merged, FR1metrics, FR1metrics_csv.")
+
+if "filename" not in bm.columns:
+    if "File" in bm.columns:
+        bm["filename"] = bm["File"].astype(str)
+    else:
+        raise RuntimeError("Metrics table must include a 'filename' column (or legacy 'File').")
+
+# -----------------------
+# Merge in XGroup/HueGroup from grouping widget
+# -----------------------
+def _basename_col(s):
+    return os.path.basename(str(s))
+
+def _src_name(df):
+    if "filename" in df.columns: return "filename"
+    if "File" in df.columns: return "File"
+    return None
+
+if ("XGroup" not in bm.columns) or ("HueGroup" not in bm.columns):
+    grp_both = globals().get('files_to_group_both', None)
+    if grp_both is not None and not grp_both.empty:
+        m = grp_both.copy()
+        m_src = _src_name(m)
+        if m_src is None:
+            raise RuntimeError("Grouping table must include 'filename' or 'File'.")
+        m["file_base"]  = m[m_src].astype(str).apply(_basename_col)
+        bm["file_base"] = bm["filename"].astype(str).apply(_basename_col)
+        bm = bm.merge(m[["file_base","XGroup","HueGroup"]], on="file_base", how="left").drop(columns=["file_base"])
+        bm["XGroup"]   = bm["XGroup"].fillna("UNASSIGNED")
+        bm["HueGroup"] = bm["HueGroup"].fillna("UNASSIGNED")
+    else:
+        raise RuntimeError("Missing X/Hue mapping. Build Groups first (two-column version).")
+
+# -----------------------
+# 1) Melt to long format
+# -----------------------
+base_metric_names = [
+    "Pellets", "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy",
+    "PokesPerPellet", "RetrievalTime", "InterPelletInterval", "PokeTime",
+    "%MealPellets", "%GrazingPellets", "NumMeals", "AvgMealSize",
+    "AvgMealDuration", "RecordingHours", "MealsPerHour",
+    "Daily_Pellets", "Left Poke with Pellet", "Within_meal_pellet_rate",
+]
+
+metric_cols, seen = [], set()
+for c in bm.columns:
+    if not pd.api.types.is_numeric_dtype(bm[c]):
+        continue
+    for base in base_metric_names:
+        if c == base or c.startswith(base + "_"):
+            if c not in seen:
+                metric_cols.append(c); seen.add(c)
+            break
+
+if not metric_cols:
+    raise RuntimeError("No numeric metric columns found among expected FR1 metrics.")
+
+candidate_id_vars = ["Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
+id_vars = [c for c in candidate_id_vars if c in bm.columns]
+for need in ["XGroup","HueGroup","filename"]:
+    if need not in id_vars:
+        id_vars.append(need)
+
+long_df = pd.melt(
+    bm, id_vars=id_vars, value_vars=metric_cols,
+    var_name="variable", value_name="value"
+)
+
+# -----------------------
+# 2) Hierarchical ordering + display formatting (no '|' shown)
+# -----------------------
+def _is_unassigned_token(s):
+    return (str(s).strip().upper() in {"", "UNASSIGNED", "NONE", "NA", "N/A"})
+
+def _split_levels(s):
+    # keep hierarchical sort, but never display separators
+    s = str(s)
+    parts = [p.strip() for p in re.split(r"\s*\|\s*|\s*[·•]\s*", s) if p.strip() != ""]
+    wanted = globals().get("selected_group_cols_x", None)
+    if isinstance(wanted, (list, tuple)) and wanted:
+        if len(parts) < len(wanted):
+            parts += [""] * (len(wanted) - len(parts))
+        else:
+            parts = parts[:len(wanted)]
+    return parts
+
+def _display_group_label(s):
+    parts = _split_levels(s)
+    return str(s) if len(parts) <= 1 else " ".join(parts)
+
+def _is_wt_group(g):
+    u = str(g).strip().upper()
+    tokens = [t for t in re.split(r'[^A-Z0-9]+', u) if t]
+    WT_ALIASES = {"WT", "WILDTYPE", "CONTROL", "CTRL"}
+    return any(t in WT_ALIASES for t in tokens)
+
+def _hier_sort_key(g):
+    lv = _split_levels(g)
+    norm = []
+    for tok in lv:
+        is_blank = 1 if _is_unassigned_token(tok) else 0
+        norm.append((is_blank, str(tok).upper()))
+    wt_present = any(_is_wt_group(tok) for tok in lv) or _is_wt_group(g)
+    wt_rank = 0 if wt_present else 1
+    return (wt_rank,) + tuple(norm) + (str(g).upper(),)
+
+def _order_x_groups(groups):
+    return sorted(groups, key=_hier_sort_key)
+
+def _choose_ref_group(order):
+    for g in order:
+        if _is_wt_group(g):
+            return g
+    return order[0] if order else None
+
+def _order_hue_groups(hues):
+    hp = globals().get("HUE_PRIORITY", ["Female", "Male", "F", "M", "ALL", "UNASSIGNED"])
+    hp_lower = [p.lower() for p in hp]
+    def _prio(h):
+        u = str(h).strip()
+        try:
+            return (0, hp_lower.index(u.lower()), u.upper())
+        except ValueError:
+            return (1, u.upper())
+    return sorted([h for h in hues if h is not None], key=_prio)
+
+all_x_raw = [g for g in long_df["XGroup"].dropna().unique().tolist() if g != "UNASSIGNED"] or ["UNASSIGNED"]
+ordered_x_raw = _order_x_groups(all_x_raw)
+
+raw_to_disp = {g: _display_group_label(g) for g in ordered_x_raw}
+disp_to_raw = {}
+for g in ordered_x_raw:
+    d = raw_to_disp[g]
+    if d in disp_to_raw:
+        d = f"{d} [{g}]"
+        raw_to_disp[g] = d
+    disp_to_raw[d] = g
+
+# -----------------------
+# 3) Controls (left column: groups & colors)
+# -----------------------
+named_defaults = ["blue","orange","green","red","purple","brown","pink","gray","olive","cyan"]
+
+x_checks, x_colors = {}, {}
+group_rows = []
+for i, g_raw in enumerate(ordered_x_raw):
+    chk = widgets.Checkbox(
+        value=True,
+        description=raw_to_disp[g_raw],
+        indent=False,
+        layout=widgets.Layout(width="260px")
+    )
+    col = widgets.Text(value=named_defaults[i % len(named_defaults)],
+                       layout=widgets.Layout(width="120px"))
+    x_checks[g_raw] = chk
+    x_colors[g_raw] = col
+    group_rows.append(widgets.HBox([chk, widgets.Label(""), col],
+                                   layout=widgets.Layout(align_items="center", height="28px")))
+
+picker = widgets.VBox(group_rows, layout=widgets.Layout(gap="2px"))
+
+btn_all  = widgets.Button(description="Select all", layout=widgets.Layout(width="140px"))
+btn_none = widgets.Button(description="Clear", layout=widgets.Layout(width="140px"))
+
+def _set_all(val):
+    for c in x_checks.values():
+        c.value = val
+
+btn_all.on_click(lambda _: _set_all(True))
+btn_none.on_click(lambda _: _set_all(False))
+
+picker_container = widgets.Box(
+    [picker],
+    layout=widgets.Layout(overflow="auto", max_height="420px",
+                          border="1px solid #ddd", padding="6px", width="360px")
+)
+
+left_col = widgets.VBox([
+    widgets.HTML("<b>Groups & Colors</b>"),
+    widgets.HBox([btn_all, btn_none], layout=widgets.Layout(gap="8px")),
+    picker_container
+], layout=widgets.Layout(width="380px"))
+
+# -----------------------
+# 4) Comparison controls (right column)
+# -----------------------
+mode_radio = widgets.ToggleButtons(
+    options=[("Reference group", "ref"), ("Select Pairs", "pairs")],
+    value="ref",
+    layout=widgets.Layout(width="320px")
+)
+
+ref_dropdown = widgets.Dropdown(
+    options=ordered_x_raw,
+    value=_choose_ref_group(ordered_x_raw),
+    description="Reference:",
+    layout=widgets.Layout(width="320px")
+)
+
+pairs_select = widgets.SelectMultiple(
+    options=[],
+    value=[],
+    description="Pairs",
+    layout=widgets.Layout(width="360px", height="320px")
+)
+
+def _selected_x_raw():
+    return _order_x_groups([g for g, cb in x_checks.items() if cb.value])
+
+def _pair_value(a, b):
+    return (a, b) if a <= b else (b, a)
+
+def _pair_sort_key(a, b):
+    A = _split_levels(a); B = _split_levels(b)
+    L = max(len(A), len(B))
+    if len(A) < L: A += [""] * (L - len(A))
+    if len(B) < L: B += [""] * (L - len(B))
+    first_diff = next((i for i, (xa, xb) in enumerate(zip(A, B)) if xa != xb), L)
+    prefix = tuple(A[:first_diff])
+    return (-first_diff, prefix, tuple(A), tuple(B))
+
+def _update_ref_and_pairs(*_):
+    sel = _selected_x_raw()
+    ref_dropdown.options = sel or ["—"]
+    if sel:
+        if ref_dropdown.value not in sel:
+            ref_dropdown.value = _choose_ref_group(sel)
+    else:
+        ref_dropdown.value = None
+
+    opts = []
+    for a, b in itertools.combinations(sel, 2):
+        lbl = f"{raw_to_disp.get(a, str(a))} ⟷ {raw_to_disp.get(b, str(b))}"
+        opts.append((lbl, _pair_value(a, b)))
+    opts.sort(key=lambda kv: _pair_sort_key(*kv[1]))
+    pairs_select.options = opts
+
+for cb in x_checks.values():
+    cb.observe(_update_ref_and_pairs, names="value")
+_update_ref_and_pairs()
+
+plot_btn = widgets.Button(description="Plot", button_style="primary",
+                          layout=widgets.Layout(width="160px"))
+save_btn = widgets.Button(description="Save Plots", button_style="success",
+                          layout=widgets.Layout(width="160px"))
+
+right_col = widgets.VBox([
+    widgets.HTML("<b>Statistical comparisons</b>"),
+    mode_radio,
+    ref_dropdown,
+    pairs_select,
+    widgets.HBox([plot_btn, save_btn], layout=widgets.Layout(gap="8px"))
+], layout=widgets.Layout(width="360px"))
+
+# -----------------------
+# 5) Clean factor labels (use what was selected)
+# -----------------------
+def _grouping_label(which="X"):
+    if which.lower().startswith("x"):
+        cols = globals().get("selected_group_cols_x", [])
+        default = "Group"
+    else:
+        cols = globals().get("selected_group_cols_hue", [])
+        default = "Hue"
+    cols = [str(c).strip() for c in (cols or []) if str(c).strip()]
+    return " ".join(cols) if cols else default
+
+# -----------------------
+# 6) Stats helpers
+# -----------------------
+def _fmt_p_text(p):
+    if p is None or (isinstance(p, float) and (not np.isfinite(p))):
+        return "p = n/a"
+    p = float(p)
+    return f"p = {p:.3f}" if p >= 0.001 else "p < 0.001"
+
+def _fmt_p_num(p):
+    if p is None or (isinstance(p, float) and (not np.isfinite(p))):
+        return "n/a"
+    p = float(p)
+    return f"{p:.4f}" if p >= 0.0001 else "<0.0001"
+
+def _p_to_stars(p):
+    if p is None or (isinstance(p, float) and (not np.isfinite(p))): return ""
+    p = float(p)
+    if p < 1e-4: return "****"
+    if p < 1e-3: return "***"
+    if p < 1e-2: return "**"
+    if p < 5e-2: return "*"
+    return ""
+
+def _fmt_F(df_num, df_den, F):
+    if any(x is None for x in [df_num, df_den, F]): return "n/a"
+    if not np.isfinite(F): return "n/a"
+    return f"F({int(df_num)}, {int(df_den)}) = {float(F):.3f}"
+
+def _anova_subset(df):
+    out = {"p_x": np.nan, "n_h": 0, "ok": False}
+    d = df.dropna(subset=["value","XGroup"]).copy()
+    if d.empty or d["XGroup"].nunique() < 2:
+        return out
+    n_h = d["HueGroup"].nunique(dropna=True)
+    out["n_h"] = int(n_h)
+    try:
+        if n_h >= 2:
+            model = ols("value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)", data=d).fit()
+            an = sm.stats.anova_lm(model, typ=2)
+            out["p_x"] = float(an.loc["C(XGroup)", "PR(>F)"])
+        else:
+            model = ols("value ~ C(XGroup)", data=d).fit()
+            out["p_x"] = float(model.f_pvalue)
+        out["ok"] = True
+    except Exception:
+        pass
+    return out
+
+def _oneway_anova_stats(df):
+    d = df.dropna(subset=["value","XGroup"]).copy()
+    if d["XGroup"].nunique() < 2:
+        return {"ok": False, "err": "Too few groups"}
+    try:
+        model = ols("value ~ C(XGroup)", data=d).fit()
+        an = sm.stats.anova_lm(model, typ=2)
+        return {
+            "ok": True,
+            "test": "One-way ANOVA",
+            "F_x": float(an.loc["C(XGroup)", "F"]),
+            "df_x_num": int(an.loc["C(XGroup)", "df"]),
+            "df_x_den": int(model.df_resid),
+            "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
+        }
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+
+def _twoway_anova_stats(df):
+    d = df.dropna(subset=["value","XGroup","HueGroup"]).copy()
+    if d["XGroup"].nunique() < 2:
+        return {"ok": False, "err": "Too few X groups"}
+
+    if d["HueGroup"].nunique(dropna=True) < 2:
+        return _oneway_anova_stats(d)
+
+    try:
+        model = ols("value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)", data=d).fit()
+        an = sm.stats.anova_lm(model, typ=2)
+        df_den = int(model.df_resid)
+        return {
+            "ok": True,
+            "test": "Two-way ANOVA",
+
+            "F_x": float(an.loc["C(XGroup)", "F"]),
+            "df_x_num": int(an.loc["C(XGroup)", "df"]),
+            "df_x_den": df_den,
+            "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
+
+            "F_h": float(an.loc["C(HueGroup)", "F"]),
+            "df_h_num": int(an.loc["C(HueGroup)", "df"]),
+            "df_h_den": df_den,
+            "p_h": float(an.loc["C(HueGroup)", "PR(>F)"]),
+
+            "F_int": float(an.loc["C(XGroup):C(HueGroup)", "F"]),
+            "df_int_num": int(an.loc["C(XGroup):C(HueGroup)", "df"]),
+            "df_int_den": df_den,
+            "p_int": float(an.loc["C(XGroup):C(HueGroup)", "PR(>F)"]),
+        }
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+
+def build_group_header_df(long_df, sel_x_raw, test_label, raw_to_disp=None):
+    """
+    Build a compact header block for Excel.
+
+    Example output (one cell per row in first column):
+      Test: Two-way ANOVA (Note: Results are not corrected for multiple comparisons)
+      Factors:
+      Genotype (X)
+      Sex (Hue)
+      Groups:
+      WT 20 (10F, 10M)
+      HET 20 (10F, 10M)
+    """
+    if raw_to_disp is None:
+        raw_to_disp = {}
+
+    x_label = _grouping_label("X")      # e.g., "Genotype"
+    h_label = _grouping_label("Hue")    # e.g., "Sex"
+
+    rows = []
+    rows.append([f"Test: {test_label} (Note: Results are not corrected for multiple comparisons)", ""])
+    rows.append(["Factors:", ""])
+    rows.append([f"{x_label} (X)", ""])
+    rows.append([f"{h_label} (Hue)", ""])
+    rows.append(["Groups:", ""])
+
+    # Count UNIQUE files only (one entry per animal/file within group combo)
+    dfu = long_df.drop_duplicates(subset=["filename", "XGroup", "HueGroup"])
+
+    for g in _order_x_groups(sel_x_raw):
+        sub = dfu[dfu["XGroup"] == g]
+        total_n = sub["filename"].nunique()
+
+        hue_counts = (
+            sub.groupby("HueGroup")["filename"]
+               .nunique()
+               .to_dict()
+        )
+
+
+        hues = list(hue_counts.keys())
+        hue_str = ", ".join([f"{hue_counts[h]}{h}" for h in hues])
+        g_disp = raw_to_disp.get(g, g)
+        rows.append([f"{g_disp} n = {total_n} ({hue_str})", ""])
+
+    return pd.DataFrame(rows, columns=["", ""])
+
+
+def build_stats_table(long_df, metrics, sel_x_raw):
+    x_label = _grouping_label("X")
+    h_label = _grouping_label("Hue")
+
+    rows = []
+
+    for metric in metrics:
+        dfm = long_df[
+            (long_df["variable"] == metric) &
+            (long_df["XGroup"].isin(sel_x_raw))
+        ].copy()
+
+        dfm = dfm.dropna(subset=["value"])
+        if dfm.empty:
+            continue
+
+        stats = _twoway_anova_stats(dfm)
+
+        # Error case
+        if not stats.get("ok", False):
+            rows.append({
+                "Figure": metric,
+                f"Effect of {x_label}": stats.get("err", "unknown error"),
+                f"Effect of {h_label}": "",
+                f"{x_label} × {h_label} interaction": "",
+            })
+            continue
+
+        # Two-way ANOVA
+        if stats["test"] == "Two-way ANOVA":
+            x_eff = (
+                f"{_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}; "
+                f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
+            ).strip()
+
+            h_eff = (
+                f"{_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}; "
+                f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
+            ).strip()
+
+            i_eff = (
+                f"{_fmt_F(stats['df_int_num'], stats['df_int_den'], stats['F_int'])}; "
+                f"p={_fmt_p_num(stats['p_int'])} {_p_to_stars(stats['p_int'])}"
+            ).strip()
+
+        # One-way fallback (Hue < 2 levels)
+        else:
+            x_eff = (
+                f"{_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}; "
+                f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
+            ).strip()
+            h_eff = ""
+            i_eff = ""
+
+        rows.append({
+            "Figure": metric,
+            f"Effect of {x_label}": x_eff,
+            f"Effect of {h_label}": h_eff,
+            f"{x_label} × {h_label} interaction": i_eff,
+        })
+
+    out = pd.DataFrame(rows)
+
+    # Consistent column order
+    col_order = [
+        "Figure",
+        f"Effect of {x_label}",
+        f"Effect of {h_label}",
+        f"{x_label} × {h_label} interaction",
+    ]
+
+    return out[[c for c in col_order if c in out.columns]]
+
+def _stats_text(dfm, x_label, hue_label, *, mode="ref", ref_group=None, pair_list=None):
+    df = dfm.dropna(subset=["value", "XGroup"]).copy()
+    if df.empty or df["XGroup"].nunique() < 2:
+        return "Too few groups for stats"
+
+    groups = _order_x_groups(df["XGroup"].dropna().unique().tolist())
+
+    stats = _twoway_anova_stats(df)
+    if not stats.get("ok", False):
+        return "\n\nANOVA failed:\n" + str(stats.get("err", "unknown error"))
+
+    lines = [stats["test"]]
+    if stats["test"] == "Two-way ANOVA":
+        lines.append(f"{x_label}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}; {_fmt_p_text(stats['p_x'])}")
+        lines.append(f"{hue_label}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}; {_fmt_p_text(stats['p_h'])}")
+        lines.append(f"{x_label} × {hue_label}: {_fmt_F(stats['df_int_num'], stats['df_int_den'], stats['F_int'])}; {_fmt_p_text(stats['p_int'])}")
+    else:
+        lines.append(f"{x_label}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}; {_fmt_p_text(stats['p_x'])}")
+    return "\n".join(lines)
+
+# -----------------------
+# 7) Plotting helpers
+# -----------------------
+def _dot_palette(hues):
+    hues = list(hues)
+    if len(hues) == 0: return {}
+    if len(hues) == 1: return {hues[0]: "black"}
+    if len(hues) == 2: return {hues[0]: "white", hues[1]: "black"}
+    defaults = plt.rcParams.get('axes.prop_cycle', None)
+    colors = defaults.by_key()['color'] if defaults else ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    return {h: colors[i % len(colors)] for i, h in enumerate(hues)}
+
+def _draw_bracket(ax, x1, x2, y, h, text):
+    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=1, c="black", zorder=5)
+    ax.text((x1+x2)/2, y+h, text, ha="center", va="bottom", fontsize=16, fontweight="bold")
+
+def _plot_metric_clean(df_metric, variable, x_color_map, *, mode="ref", ref_group=None, pair_list=None, return_fig=False):
+    dfm = df_metric.copy()
+    order_raw = _order_x_groups(dfm["XGroup"].dropna().unique().tolist())
+    if not order_raw:
+        return None
+
+    if (not ref_group) or (ref_group not in order_raw):
+        ref_group = _choose_ref_group(order_raw)
+
+    x_label_name   = _grouping_label("X")
+    hue_label_name = _grouping_label("Hue")
+
+    hue_levels = [h for h in dfm["HueGroup"].dropna().unique().tolist()]
+    pal_dots = _dot_palette(hue_levels)
+
+    # Fixed width per group logic
+    width_per_group = 1.0
+    fixed_padding = 2.5
+    total_width = (len(order_raw) * width_per_group) + fixed_padding
+
+    height = 4.0
+    fig, (ax_plot, ax_text) = plt.subplots(
+        1, 2, figsize=(total_width, height), gridspec_kw={'width_ratios': [len(order_raw), 1]}
+    )
+
+    bar_palette = [x_color_map.get(g, "tab:blue") for g in order_raw]
+    sns.barplot(data=dfm, x="XGroup", y="value", order=order_raw, ci=None, alpha=ALPHA, ax=ax_plot, palette=bar_palette)
+
+    sns.stripplot(
+        data=dfm, x="XGroup", y="value", order=order_raw, hue="HueGroup",
+        jitter=True, dodge=False, size=7, edgecolor="black", linewidth=1,
+        palette=pal_dots, ax=ax_plot, zorder=3, alpha=ALPHA
+    )
+    if ax_plot.legend_ is not None:
+        ax_plot.legend_.remove()
+
+    ax_plot.set_xticklabels([raw_to_disp.get(g, str(g)) for g in order_raw], rotation=45, ha="right")
+
+    y_min, y_max = ax_plot.get_ylim()
+    span = (y_max - y_min) if y_max > y_min else 1.0
+    bump = 0.06 * span
+    data_max = dfm["value"].max() if dfm["value"].notna().any() else y_max
+
+    if mode == "ref" and (ref_group in order_raw):
+        ref_vals = dfm[dfm["XGroup"] == ref_group]["value"].dropna().to_numpy()
+        for g in order_raw:
+            if g == ref_group:
+                continue
+            vals = dfm[dfm["XGroup"] == g]["value"].dropna().to_numpy()
+            if len(vals) >= 2 and len(ref_vals) >= 2:
+                try:
+                    p = float(pg.ttest(vals, ref_vals, paired=False)["p-val"].values[0])
+                except Exception:
+                    p = np.nan
+                if np.isfinite(p) and p < 0.05:
+                    xloc = order_raw.index(g)
+                    gmax = dfm[dfm["XGroup"] == g]["value"].max()
+                    y_star = (gmax if np.isfinite(gmax) else data_max) + bump
+                    ax_plot.text(xloc, y_star, _p_to_stars(p),
+                                 ha="center", va="bottom", fontsize=16, fontweight="bold")
+                    y_max = max(y_max, y_star + bump)
+        ax_plot.set_ylim(y_min, y_max)
+
+    elif mode == "pairs" and pair_list:
+        base = (dfm["value"].max() if dfm["value"].notna().any() else y_max) + bump
+        step = 0.12 * span
+        k = 0
+        for a, b in pair_list:
+            if (a not in order_raw) or (b not in order_raw):
+                continue
+            sub = dfm[dfm["XGroup"].isin([a, b])].dropna(subset=["value"])
+            if sub["XGroup"].nunique() < 2:
+                continue
+            res = _anova_subset(sub)
+            if res["ok"] and np.isfinite(res["p_x"]) and (res["p_x"] < 0.05):
+                x1 = order_raw.index(a); x2 = order_raw.index(b)
+                if x1 > x2: x1, x2 = x2, x1
+                y_here = base + k * step
+                _draw_bracket(ax_plot, x1, x2, y_here, 0.04 * span, _p_to_stars(res["p_x"]))
+                y_max = max(y_max, y_here + 0.08 * span)
+                k += 1
+        ax_plot.set_ylim(y_min, y_max)
+
+    ax_plot.set_title(variable, fontsize=14)
+    ax_plot.set_xlabel("")
+    ax_plot.set_ylabel(variable)
+    sns.despine(ax=ax_plot)
+
+    ax_text.axis("off")
+    ax_text.text(
+        0, 1,
+        _stats_text(dfm, x_label_name, hue_label_name, mode=mode, ref_group=ref_group, pair_list=pair_list),
+        va="top", ha="left", fontsize=11, transform=ax_text.transAxes
+    )
+
+    plt.tight_layout()
+    return fig if return_fig else plt.show()
+
+# -----------------------
+# 8) Actions
+# -----------------------
+out = widgets.Output()
+
+def _selected_x_and_colors():
+    sel = _selected_x_raw()
+    color_map = {}
+    for g in sel:
+        val = x_colors[g].value.strip()
+        color_map[g] = val if val else "tab:blue"
+    return sel, color_map
+
+def _current_pairs():
+    return list(pairs_select.value)
+
+def _get_metrics_list():
+    exclude = {"PeakAccuracy_Day","PeakAccuracy_Night",
+               "Win-stay_Day","Win-stay_Night",
+               "Lose-shift_Day","Lose-shift_Night"}
+    return [m for m in long_df["variable"].dropna().unique() if m not in exclude]
+
+def _run_plots(_=None):
+    with out:
+        clear_output()
+        sel_x, color_map = _selected_x_and_colors()
+        if len(sel_x) < 1:
+            print("Select at least one group."); return
+
+        mode = mode_radio.value
+        if mode == "ref":
+            ref = ref_dropdown.value if (ref_dropdown.value in sel_x) else _choose_ref_group(sel_x)
+            print(f"Groups: {[raw_to_disp.get(g, g) for g in sel_x]}    reference: {raw_to_disp.get(ref, ref)}")
+        else:
+            pair_list = _current_pairs()
+            if not pair_list:
+                print(f"Groups: {[raw_to_disp.get(g, g) for g in sel_x]}    no pairs selected."); return
+            pretty_pairs = [(raw_to_disp.get(a, a), raw_to_disp.get(b, b)) for a, b in pair_list]
+            print(f"Groups: {[raw_to_disp.get(g, g) for g in sel_x]}    pairs: {pretty_pairs}")
+
+        metrics = _get_metrics_list()
+        for metric in metrics:
+            subset = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))]
+            if subset["value"].dropna().empty:
+                continue
+            if mode == "ref":
+                _plot_metric_clean(
+                    subset, metric,
+                    x_color_map={g: color_map[g] for g in sel_x if g in subset["XGroup"].unique()},
+                    mode="ref", ref_group=ref
+                )
+            else:
+                _plot_metric_clean(
+                    subset, metric,
+                    x_color_map={g: color_map[g] for g in sel_x if g in subset["XGroup"].unique()},
+                    mode="pairs", pair_list=_current_pairs()
+                )
+
+def _save_plots(_=None):
+    with out:
+        clear_output()
+
+        sel_x, color_map = _selected_x_and_colors()
+        if len(sel_x) < 1:
+            print("Select at least one group."); return
+
+        mode = mode_radio.value
+        ref = ref_dropdown.value if (mode == "ref") else None
+        pair_list = _current_pairs() if (mode == "pairs") else None
+        if mode == "pairs" and not pair_list:
+            print("Select at least one pair before saving."); return
+
+        src_df = globals().get("FR1metrics_merged", None)
+        if src_df is None or src_df.empty:
+            src_df = bm
+
+        example = src_df.iloc[0]
+        strain_name = str(example.get("Gene", example.get("Strain", "FR1"))).replace(" ", "_")
+
+        strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "Metrics"))
+        try:
+            strain_num = f"{int(strain_num_raw):03d}"
+        except Exception:
+            strain_num = str(strain_num_raw).zfill(3)
+
+        task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
+        out_dir = f"{strain_name}_{strain_num}_{task_name}_Figures"
+
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+
+        metrics = _get_metrics_list()
+
+        stats_df  = build_stats_table(long_df, metrics, sel_x)
+        dfu = long_df[long_df["XGroup"].isin(sel_x)].dropna(subset=["value"])
+        test_label = "Two-way ANOVA" if dfu["HueGroup"].nunique(dropna=True) >= 2 else "One-way ANOVA"
+
+        header_df = build_group_header_df(long_df, sel_x, test_label)
+
+        stats_path = f"{out_dir}/FR1_stats_table.xlsx"
+        with pd.ExcelWriter(stats_path, engine="openpyxl") as writer:
+            header_df.to_excel(writer, index=False, header=False, sheet_name="Stats")
+            stats_df.to_excel(writer, index=False, startrow=len(header_df) + 1, sheet_name="Stats")
+
+        saved = 0
+        for metric in metrics:
+            subset = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))]
+            if subset["value"].dropna().empty:
+                continue
+
+            fig = _plot_metric_clean(
+                subset, metric,
+                x_color_map={g: color_map[g] for g in sel_x if g in subset["XGroup"].unique()},
+                mode=mode, ref_group=ref, pair_list=pair_list, return_fig=True
+            )
+            safe = metric.replace(" ", "_").replace("/", "-")
+            fig.savefig(f"{out_dir}/{safe}.pdf", dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            saved += 1
+
+        if saved == 0:
+            print("No figures to save."); return
+
+        zipname = f"{out_dir}_{int(time.time())}.zip"
+        shutil.make_archive(zipname.replace(".zip", ""), "zip", out_dir)
+
+        if colab_files is not None:
+            colab_files.download(zipname)
+
+        print(f"Saved {zipname}")
+        print(f"Included stats table: {stats_path}")
+
+# avoid double-callbacks if you re-run the cell
+try:
+    plot_btn._click_handlers.callbacks = []
+    save_btn._click_handlers.callbacks = []
+except Exception:
+    pass
+
+plot_btn.on_click(_run_plots)
+save_btn.on_click(_save_plots)
+
+# -----------------------
+# 9) Assemble UI
+# -----------------------
+def _toggle_controls(*_):
+    if mode_radio.value == "ref":
+        ref_dropdown.layout.display = ""
+        pairs_select.layout.display = "none"
+    else:
+        ref_dropdown.layout.display = "none"
+        pairs_select.layout.display = ""
+_toggle_controls()
+mode_radio.observe(lambda _: _toggle_controls(), names="value")
+
+row = widgets.HBox(
+    [left_col, right_col],
+    layout=widgets.Layout(justify_content="flex-start", align_items="flex-start", gap="16px", width="auto")
+)
+ui = widgets.VBox(
+    [widgets.HTML("<h3 style='margin-bottom:6px'>FR1 Metric Comparisons</h3>"), row, out],
+    layout=widgets.Layout(width="auto")
+)
+
+display(ui)
+_run_plots()
+
+
+# In[ ]:
+
+
+#@title Day/Night metrics
+import re
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+
+# ---- Config ----
+# If you want to force a specific set, set FORCE_BASES to a list of base names (without _Day/_Night)
+FORCE_BASES = None  # e.g., ["%MealPellets","%GrazingPellets","Pellets","NumMeals","AvgMealSize","AvgMealDuration","MealsPerHour","Accuracy"]
+DAY_TAG, NIGHT_TAG = "_Day", "_Night"
+BAR_WIDTH = 0.36
+NIGHT_ALPHA = 0.6
+DOT_SIZE = 7
+EDGE_LW_DAY = 2.0
+EDGE_LW_NIGHT = 1.0
+
+ALLOWED_DN_BASES = {
+    "%MealPellets","%GrazingPellets","Pellets","NumMeals","AvgMealSize",
+    "AvgMealDuration","MealsPerHour","Accuracy"
+}
+
+# ---- Helpers reused/compatible with previous cell ----
+def _safe_order(groups):
+    groups = [g for g in groups if pd.notna(g)]
+    if '_order_x_groups' in globals():
+        try:
+            return _order_x_groups(groups)
+        except Exception:
+            pass
+    return sorted(groups, key=lambda s: str(s).upper())
+
+def _selected_x_groups():
+    if 'x_checks' in globals() and isinstance(x_checks, dict) and len(x_checks):
+        sel = [g for g, cb in x_checks.items() if getattr(cb, "value", False)]
+        return _safe_order(sel)
+    if 'long_df' not in globals():
+        raise RuntimeError("long_df not found")
+    return _safe_order(long_df["XGroup"].dropna().unique().tolist())
+
+def _color_map(x_groups):
+    if 'x_colors' in globals() and isinstance(x_colors, dict) and len(x_colors):
+        out = {}
+        for g in x_groups:
+            w = x_colors.get(g, None)
+            val = getattr(w, "value", None) if w is not None else None
+            out[g] = (val.strip() if isinstance(val, str) and val.strip() else "blue")
+        return out
+    defaults = ["blue","orange","green","red","purple","brown","pink","gray","olive","cyan"]
+    return {g: defaults[i % len(defaults)] for i, g in enumerate(x_groups)}
+
+def _label_for(which="X"):
+    if '_grouping_label' in globals():
+        return _grouping_label(which)
+    return "XGroup" if which.lower().startswith("x") else "HueGroup"
+
+def _dot_palette_local(hues):
+    if '_dot_palette' in globals():
+        return _dot_palette(hues)
+    hues = list(hues)
+    if len(hues) == 0: return {}
+    if len(hues) == 1: return {hues[0]: "black"}
+    if len(hues) == 2: return {hues[0]: "white", hues[1]: "black"}
+    defaults = plt.rcParams.get('axes.prop_cycle', None)
+    colors = defaults.by_key()['color'] if defaults else ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+    return {h: colors[i % len(colors)] for i, h in enumerate(hues)}
+
+# ---- Day/Night extraction helpers ----
+def _extract_dn_base(var_name):
+    """
+    From a long_df 'variable' like 'Pellets_Day' or 'Pellets_Day_FR1', return 'Pellets'.
+    Returns None if it doesn't look like a Day/Night variable.
+    """
+    if "_Day" in var_name:
+        return var_name.split("_Day", 1)[0]
+    if "_Night" in var_name:
+        return var_name.split("_Night", 1)[0]
+    return None
+
+def _ensure_daynight_view(df, base):
+    """
+    Build a tidy DataFrame with columns: XGroup, HueGroup, DayNight ('Day'/'Night'), value
+    Works with variables that might include session suffixes (e.g., '<base>_Day_FR1').
+    """
+    patt_day = re.compile(rf"^{re.escape(base)}{re.escape(DAY_TAG)}(?:_.+)?$")
+    patt_ngt = re.compile(rf"^{re.escape(base)}{re.escape(NIGHT_TAG)}(?:_.+)?$")
+    keep_mask = df["variable"].astype(str).str.match(patt_day) | df["variable"].astype(str).str.match(patt_ngt)
+    d = df.loc[keep_mask].copy()
+    if d.empty:
+        return d
+    d["DayNight"] = np.where(d["variable"].str.match(patt_day), "Day", "Night")
+    return d
+
+def _discover_daynight_bases(df):
+    vars_ = df["variable"].astype(str).unique().tolist()
+    bases = sorted({b for v in vars_ for b in [_extract_dn_base(v)] if b})
+    # Keep only bases we actually want to plot (and that make sense for FR1)
+    bases = [b for b in bases if b in ALLOWED_DN_BASES]
+    return bases
+
+# ---- Stats text (ANOVA with Day/Night included) ----
+def _anova_daynight_text(df_dn, x_label, hue_label):
+    d = df_dn.dropna(subset=["value","XGroup","DayNight"]).copy()
+    if d["XGroup"].nunique() < 2 or d["DayNight"].nunique() < 2:
+        return "Too few groups or missing Day/Night to run ANOVA."
+
+    has_hue = d["HueGroup"].nunique(dropna=True) >= 2
+    try:
+        if has_hue:
+            model = ols('value ~ C(XGroup) + C(DayNight) + C(HueGroup) + '
+                        'C(XGroup):C(DayNight) + C(XGroup):C(HueGroup) + '
+                        'C(DayNight):C(HueGroup) + C(XGroup):C(DayNight):C(HueGroup)',
+                        data=d).fit()
+            an = sm.stats.anova_lm(model, typ=2)
+            def pget(term):
+                return float(an.loc[term, 'PR(>F)']) if term in an.index else np.nan
+            def fmt(p):
+                if not np.isfinite(p): return "n/a"
+                return f"p = {p:.3f}" if p >= 0.001 else "p < 0.001"
+            return (
+                "Three-way ANOVA (XGroup, Day/Night, Hue)\n"
+                f"{x_label}: {fmt(pget('C(XGroup)'))}\n"
+                f"Day/Night: {fmt(pget('C(DayNight)'))}\n"
+                f"{hue_label}: {fmt(pget('C(HueGroup)'))}\n"
+                f"{x_label}×Day/Night: {fmt(pget('C(XGroup):C(DayNight)'))}\n"
+                f"{x_label}×{hue_label}: {fmt(pget('C(XGroup):C(HueGroup)'))}\n"
+                f"Day/Night×{hue_label}: {fmt(pget('C(DayNight):C(HueGroup)'))}\n"
+                f"{x_label}×Day/Night×{hue_label}: {fmt(pget('C(XGroup):C(DayNight):C(HueGroup)'))}"
+            )
+        else:
+            model = ols('value ~ C(XGroup) + C(DayNight) + C(XGroup):C(DayNight)', data=d).fit()
+            an = sm.stats.anova_lm(model, typ=2)
+            def fmt(p):
+                if not np.isfinite(p): return "n/a"
+                return f"p = {p:.3f}" if p >= 0.001 else "p < 0.001"
+            return (
+                "Two-way ANOVA (XGroup, Day/Night)\n"
+                f"{_label_for('X')}: {fmt(float(an.loc['C(XGroup)','PR(>F)']))}\n"
+                f"Day/Night: {fmt(float(an.loc['C(DayNight)','PR(>F)']))}\n"
+                f"{_label_for('X')}×Day/Night: {fmt(float(an.loc['C(XGroup):C(DayNight)','PR(>F)']))}"
+            )
+    except Exception as e:
+        return f"ANOVA failed: {e}"
+
+# ---- Main plotting for a single base ----
+def _plot_day_night_for_base(base, x_groups, color_map):
+    df_dn = _ensure_daynight_view(long_df, base)
+    df_dn = df_dn[df_dn["XGroup"].isin(x_groups)].copy()
+    if df_dn.empty:
+        print(f"Skipping {base}: no Day/Night data for selected groups.")
+        return
+
+    x_label = _label_for("X")
+    hue_label = _label_for("Hue")
+
+    hue_levels = [h for h in df_dn["HueGroup"].dropna().unique().tolist()]
+    pal_dots = _dot_palette_local(hue_levels)
+
+    means = (df_dn.dropna(subset=["value"])
+                  .groupby(["XGroup","DayNight"], as_index=False)["value"]
+                  .mean().rename(columns={"value":"mean"}))
+    grid = (means.set_index(["XGroup","DayNight"])["mean"]
+                 .unstack("DayNight")
+                 .reindex(index=x_groups, columns=["Day","Night"]))
+
+    width = max(4, 1.2 * len(x_groups))
+    fig, (ax, ax_txt) = plt.subplots(1, 2, figsize=(width, 4.6), gridspec_kw={'width_ratios': [3, 1]})
+
+    x = np.arange(len(x_groups))
+    off = BAR_WIDTH/2.0 + 0.02
+    pos_day = x - off
+    pos_night = x + off
+
+    # Night bars (filled)
+    for i, g in enumerate(x_groups):
+        val = grid.loc[g, "Night"] if ("Night" in grid.columns) else np.nan
+        if pd.notna(val):
+            ax.bar(pos_night[i], val, width=BAR_WIDTH, color=color_map[g],
+                   alpha=NIGHT_ALPHA, edgecolor="black", linewidth=EDGE_LW_NIGHT, zorder=2)
+
+    # Day bars (outline)
+    for i, g in enumerate(x_groups):
+        val = grid.loc[g, "Day"] if ("Day" in grid.columns) else np.nan
+        if pd.notna(val):
+            ax.bar(pos_day[i], val, width=BAR_WIDTH, facecolor=(0,0,0,0),
+                   edgecolor=color_map[g], linewidth=EDGE_LW_DAY, zorder=3)
+
+    # Overlay individual dots by HueGroup
+    rng = np.random.default_rng(42)
+    jitter = lambda n: (rng.normal(0, 0.02, size=n))
+
+    # Day dots (outline markers)
+    sdf = df_dn[df_dn["DayNight"] == "Day"].dropna(subset=["value"])
+    for g in x_groups:
+        sub = sdf[sdf["XGroup"] == g]
+        if sub.empty: continue
+        px = pos_day[x_groups.index(g)]
+        for h in sub["HueGroup"].unique():
+            hh = sub[sub["HueGroup"] == h]
+            if hh.empty: continue
+            ax.scatter(np.full(len(hh), px) + jitter(len(hh)), hh["value"],
+                       s=DOT_SIZE**2/2, facecolors=pal_dots.get(h, "black"),
+                       edgecolors="black", linewidths=0.6, alpha=NIGHT_ALPHA, zorder=4)
+
+    # Night dots (filled markers)
+    sdf = df_dn[df_dn["DayNight"] == "Night"].dropna(subset=["value"])
+    for g in x_groups:
+        sub = sdf[sdf["XGroup"] == g]
+        if sub.empty: continue
+        px = pos_night[x_groups.index(g)]
+        for h in sub["HueGroup"] == sub["HueGroup"]:
+            pass  # to keep structure clear
+        for h in sub["HueGroup"].unique():
+            hh = sub[sub["HueGroup"] == h]
+            if hh.empty: continue
+            ax.scatter(np.full(len(hh), px) + jitter(len(hh)), hh["value"],
+                       s=DOT_SIZE**2/2, facecolors=pal_dots.get(h, "black"),
+                       edgecolors="black", linewidths=0.6, alpha=NIGHT_ALPHA, zorder=4)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_groups, rotation=45, ha="right")
+    ax.set_ylabel(base)
+    ax.set_title(f"{base}")
+    sns.despine(ax=ax)
+
+    ax_txt.axis("off")
+    ax_txt.text(0, 1, _anova_daynight_text(df_dn, x_label, hue_label),
+                va="top", ha="left", fontsize=12, transform=ax_txt.transAxes)
+
+    if len(hue_levels) >= 2:
+        handles = [plt.Line2D([0],[0], marker='o', linestyle='None',
+                              markerfacecolor=pal_dots[h], markeredgecolor='black',
+                              label=str(h)) for h in hue_levels]
+        ax_txt.legend(handles=handles, title=hue_label,
+                      loc="upper left", bbox_to_anchor=(0, 0.3),
+                      frameon=False)
+    plt.tight_layout()
+    plt.show()
+
+# ---- Run ----
+if 'long_df' not in globals():
+    raise RuntimeError("This cell expects long_df from the previous cell.")
+
+Xsel = _selected_x_groups()
+if not Xsel:
+    print("No X groups selected or available.")
+else:
+    cmap = _color_map(Xsel)
+    if FORCE_BASES is not None:
+        BASES = [b for b in FORCE_BASES if b in ALLOWED_DN_BASES]
+    else:
+        BASES = _discover_daynight_bases(long_df)
+    if not BASES:
+        print("No Day/Night metrics found in long_df.")
+    else:
+        for base in BASES:
+            _plot_day_night_for_base(base, Xsel, cmap)
+
+
+# In[ ]:
+
+
+# @title Interpellet intervals
+
+import os
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# 1) Collect IPI from file_to_df
+if "file_to_df" not in globals():
+    if "loaded_files" in globals() and "feds" in globals():
+        file_to_df = {Path(str(fname)).name: df for fname, df in zip(loaded_files, feds)}
+    else:
+        raise RuntimeError("Missing `file_to_df`.")
+
+rows = []
+for fname, df in file_to_df.items():
+    if df is None or df.empty:
+        continue
+    if "Event" in df.columns:
+        df = df[df["Event"].isin(["Left","Right","Pellet"])].copy()
+    if "InterPelletInterval" not in df.columns:
+        continue
+    vals = pd.to_numeric(df["InterPelletInterval"], errors="coerce").dropna()
+    vals = vals[vals > 0]
+    if vals.empty:
+        continue
+    base = os.path.basename(str(fname))
+    rows.extend({"filename": base, "IPI_s": float(v)} for v in vals)
+
+ipi = pd.DataFrame(rows)
+if ipi.empty:
+    raise RuntimeError("No InterPelletInterval values found.")
+
+# 2) Merge XGroup from files_to_group_both (ignore Hue)
+if "files_to_group_both" not in globals() or files_to_group_both is None or files_to_group_both.empty:
+    raise RuntimeError("Missing `files_to_group_both`. Build Groups first.")
+
+grp = files_to_group_both.copy()
+src_col = "filename" if "filename" in grp.columns else ("File" if "File" in grp.columns else None)
+if src_col is None:
+    raise RuntimeError("`files_to_group_both` needs 'filename' or 'File'.")
+grp["filename"] = grp[src_col].astype(str).map(os.path.basename)
+ipi = ipi.merge(grp[["filename","XGroup"]].drop_duplicates(), on="filename", how="left")
+ipi["XGroup"] = ipi["XGroup"].fillna("UNASSIGNED")
+
+# 3) Choose groups: all checked in widget, else all present
+def _selected_xgroups():
+    if 'x_checks' in globals() and isinstance(x_checks, dict) and len(x_checks):
+        return [g for g, cb in x_checks.items() if getattr(cb, "value", False)]
+    return sorted(ipi["XGroup"].dropna().unique().tolist())
+
+chosen = _selected_xgroups()
+if not chosen:
+    raise RuntimeError("No XGroups selected/found.")
+ipi2 = ipi[ipi["XGroup"].isin(chosen)].copy()
+
+# 4) KDE in log10 space (correct for log-x plotting)
+ipi2 = ipi2[(ipi2["IPI_s"] > 0) & np.isfinite(ipi2["IPI_s"])]
+ipi2["log10_IPI"] = np.log10(ipi2["IPI_s"])
+
+# --- Match order & colors from the main plotting cell ---
+
+_present = ipi2["XGroup"].dropna().unique().tolist()
+
+# ORDER: prefer the global ordered_x (WT/CONTROL-first); otherwise reproduce rule locally
+if "ordered_x" in globals():
+    group_order = [g for g in ordered_x if g in _present] + [g for g in _present if g not in ordered_x]
+else:
+    import re
+    def _is_wt(g):
+        toks = [t for t in re.split(r'[^A-Z0-9]+', str(g).upper()) if t]
+        return any(t in {"WT", "WILDTYPE", "CONTROL", "CTRL"} for t in toks)
+    def _x_levels(g): return [p.strip() for p in str(g).split("|")]
+    def _key(g):
+        lv = _x_levels(g)
+        wt_rank = 0 if any(_is_wt(tok) for tok in lv) or _is_wt(g) else 1
+        blanks = [(1 if s.strip().upper() in {"","UNASSIGNED","NONE","NA","N/A"} else 0, s.upper()) for s in lv]
+        return (wt_rank, *blanks, str(g).upper())
+    group_order = sorted(_present, key=_key)
+
+# COLORS: pull from x_colors (widgets) so bars/lines/KDE match
+palette_map = None
+if "x_colors" in globals() and isinstance(x_colors, dict) and x_colors:
+    def _col(g):
+        try:
+            v = x_colors[g].value
+            return v.strip() if isinstance(v, str) and v.strip() else "tab:blue"
+        except Exception:
+            return "tab:blue"
+    palette_map = {g: _col(g) for g in group_order}
+
+# ---- PLOT ONLY (no metric computation) ----
+sns.set_style("white")
+plt.figure(figsize=(9, 5))
+sns.set_style("white")
+fig, ax = plt.subplots(figsize=(10, 5))
+
+# convert seconds to minutes and compute log10 in minutes
+ipi2["IPI_min"] = ipi2["IPI_s"] / 60.0
+ipi2 = ipi2[(ipi2["IPI_min"] > 0) & np.isfinite(ipi2["IPI_min"])]
+ipi2["log10_IPI_min"] = np.log10(ipi2["IPI_min"])
+
+# plot KDE in log10(minutes)
+ax = sns.kdeplot(
+    data=ipi2,
+    x="log10_IPI_min",
+    hue="XGroup",
+    hue_order=group_order,
+    palette=palette_map,
+    fill=False,
+    common_norm=False,
+    cut=0,
+    bw_adjust=0.9,
+    gridsize=512,
+    linewidth=2
+)
+
+# Nice decade ticks based on data range (in log10 minutes)
+lo = np.floor(ipi2["log10_IPI_min"].min())
+hi = np.ceil(ipi2["log10_IPI_min"].max())
+ticks_log = np.arange(lo, hi + 1)
+ax.set_xticks(ticks_log)
+
+def _min_label(t):
+    v = 10.0 ** float(t)  # minutes
+    # format: show 2 decimals if <1 min, otherwise integer minutes
+    return f"{v:.2f}" if v < 1 else f"{int(round(v))}"
+
+ax.set_xticklabels([_min_label(t) for t in ticks_log])
+ax.set_xlabel("Interpellet Interval (min)")
+ax.set_ylabel("Density")
+ax.set_title("")
+leg = ax.get_legend()
+if leg:
+    leg.set_title("")
+    leg.set_frame_on(False)
+sns.despine()
+plt.tight_layout()
+
+# Embed TrueType fonts so text stays editable in Illustrator/Inkscape
+import matplotlib as mpl
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype'] = 42
+
+outdir = "figures"
+os.makedirs(outdir, exist_ok=True)
+from datetime import datetime
+fname = f"interpellet_histogram_{datetime.now():%Y-%m-%d}.pdf"
+fig = ax.get_figure()
+fig.savefig(
+    os.path.join(outdir, fname),
+    format="pdf",
+    bbox_inches="tight",
+    transparent=True,
+)
+files.download(os.path.join(outdir, fname))
+plt.show()
+
+
+# In[ ]:
+
+
+# @title Cluster FR1 by heatmap & PCA (X/Hue from Group UI; generic labels/markers)
+
+import os, re
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib.gridspec as gridspec
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# ---------- Pick FR1 source ----------
+if 'FR1metrics_merged' in globals() and FR1metrics_merged is not None and not FR1metrics_merged.empty:
+    FR1_src = FR1metrics_merged.copy()
+elif 'FR1metrics_csv' in globals() and FR1metrics_csv is not None and not FR1metrics_csv.empty:
+    FR1_src = FR1metrics_csv.copy()
+elif 'FR1metrics' in globals() and FR1metrics is not None and not FR1metrics.empty:
+    FR1_src = FR1metrics.copy()
+else:
+    raise RuntimeError("No FR1 table found. Expect FR1metrics_merged, FR1metrics_csv, FR1metrics, or FR1_metrics.")
+
+# Ensure we have a File column (fallback from filename if needed)
+if 'File' not in FR1_src.columns:
+    if 'filename' in FR1_src.columns:
+        FR1_src = FR1_src.copy()
+        FR1_src['File'] = FR1_src['filename'].astype(str)
+    else:
+        raise RuntimeError("FR1 table must include 'File' or 'filename' column.")
+
+# ---------- Groups from the Group UI ----------
+def _basename(p): return os.path.basename(str(p))
+
+if 'files_to_group_both' in globals() and files_to_group_both is not None and not files_to_group_both.empty:
+    grp_map = files_to_group_both.copy()
+    src_col = 'filename' if 'filename' in grp_map.columns else 'File'
+    grp_map["File_base"] = grp_map[src_col].astype(str).apply(_basename)
+    grp_map = grp_map[["File_base","XGroup","HueGroup"]]
+else:
+    raise RuntimeError("No groups found. Run the 'Group for plotting' widget (two-column) and click 'Build Groups'.")
+# Ensure both tables have a File_base column built from the filename/File
+FR1_src = FR1_src.copy()
+src_col_fr1 = 'filename' if 'filename' in FR1_src.columns else 'File'
+FR1_src['File_base'] = FR1_src[src_col_fr1].astype(str).apply(_basename)
+
+# grp_map already has File_base from earlier code
+# Merge groups onto FR1; each file should map to at most one (XGroup, HueGroup)
+ldf = (
+    FR1_src.merge(
+        grp_map, on='File_base', how='left', validate='m:1'
+    )
+)
+
+# Helpful checks
+if {'XGroup','HueGroup'}.issubset(ldf.columns) and ldf[['XGroup','HueGroup']].isna().all().all():
+    raise RuntimeError(
+        "Group merge completed but all XGroup/HueGroup are NaN. "
+        "Check that the basename in FR1 matches the Group UI table."
+    )
+# ---------- STRICT METRIC SELECTION (whitelist patterns) ----------
+# Base metric names (covers base, _Day/_Night, and any extra suffix like _FR1)
+_METRIC_BASES = [
+    "Pellets","Left_Poke","Right_Poke","Total_Pokes","Accuracy","PokesPerPellet",
+    "RetrievalTime","InterPelletInterval","PokeTime",
+    "%MealPellets","%GrazingPellets","NumMeals","AvgMealSize","AvgMealDuration",
+    "RecordingHours","MealsPerHour","Daily_Pellets","Left Poke with Pellet",
+]
+
+def _metric_regex_from_bases(bases):
+    safes = [re.escape(b) for b in bases]
+    # Match base; optionally _Day/_Night; optionally any further suffix (e.g., _FR1)
+    return re.compile(rf"^(?:{'|'.join(safes)})(?:_(?:Day|Night))?(?:_.+)?$")
+
+_METRIC_RX = _metric_regex_from_bases(_METRIC_BASES)
+
+# Identify metric columns by name pattern only (ignore dtype), exclude ids explicitly
+ID_LIKE = {
+    "File","filename","Mouse_ID","Strain","Sex","Genotype","Session_type",
+    "File_base","XGroup","HueGroup"
+}
+metric_columns = [c for c in ldf.columns if isinstance(c, str) and _METRIC_RX.match(c) and c not in ID_LIKE]
+if not metric_columns:
+    raise RuntimeError("No metric columns matched the whitelist patterns. Check column names or base lists.")
+
+# Coerce metric columns to numeric safely
+for c in metric_columns:
+    ldf[c] = pd.to_numeric(ldf[c], errors="coerce")
+
+# ---------- Build long & wide ----------
+id_keep = [c for c in ["File","filename","Mouse_ID","Strain","Sex","Genotype","Session_type","XGroup","HueGroup"] if c in ldf.columns]
+
+long_df = ldf.melt(
+    id_vars=id_keep,
+    value_vars=metric_columns,
+    var_name="metric",
+    value_name="value"
+).copy()
+
+# Wide (one row per file/animal), average duplicates
+wide_index = [c for c in ["File","filename","Mouse_ID","Strain","Sex","Genotype","XGroup","HueGroup"] if c in long_df.columns]
+wide_metrics = (
+    long_df.pivot_table(
+        index=wide_index,
+        columns="metric",
+        values="value",
+        aggfunc="mean",
+        observed=True
+    )
+    .reset_index()
+)
+
+# The metric columns are exactly those we whitelisted
+metric_columns = [c for c in wide_metrics.columns if c not in wide_index]
+
+# ---------- Group means by XGroup (for heatmap & PCA feature set) ----------
+if ("XGroup" not in wide_metrics.columns) or ("HueGroup" not in wide_metrics.columns):
+    raise RuntimeError("XGroup and HueGroup are required to cluster on both.")
+
+# Order rows as a stable product of XGroup then HueGroup
+_x_order = sorted(wide_metrics["XGroup"].astype(str).unique())
+_h_order = sorted(wide_metrics["HueGroup"].astype(str).unique())
+
+group_means = (
+    wide_metrics
+    .assign(XGroup=wide_metrics["XGroup"].astype(str),
+            HueGroup=wide_metrics["HueGroup"].astype(str))
+    .groupby(["XGroup", "HueGroup"], dropna=False)[metric_columns]
+    .mean()
+    .reindex(pd.MultiIndex.from_product([_x_order, _h_order],
+                                        names=["XGroup","HueGroup"]))
+)
+
+# Build a readable index like "X | Hue" for the heatmap rows
+group_means.index = [f"{x} | {h}" for x, h in group_means.index]
+
+# ---------- Heatmap (min–max per column, with numeric annotations) ----------
+def _fmt_cell(x):
+    if pd.isna(x): return ""
+    ax = abs(float(x))
+    return f"{x:.0f}" if ax >= 100 else f"{x:.1f}" if ax >= 10 else f"{x:.2f}"
+
+annot_data = group_means.applymap(_fmt_cell)
+
+heatmap_scaled = group_means.copy()
+for col in heatmap_scaled.columns:
+    col_min, col_max = heatmap_scaled[col].min(), heatmap_scaled[col].max()
+    if pd.isna(col_min) or pd.isna(col_max):
+        heatmap_scaled[col] = 0.0
+    elif col_max == col_min:
+        heatmap_scaled[col] = 0.5  # constant column → mid tone
+    else:
+        heatmap_scaled[col] = (heatmap_scaled[col] - col_min) / (col_max - col_min)
+
+heatmap_scaled = heatmap_scaled.sort_index()
+annot_data = annot_data.loc[heatmap_scaled.index]
+
+# ---------- PCA (same metric set) ----------
+pca_features = metric_columns[:]  # same set used in heatmap
+mouse_data = wide_metrics.dropna(subset=pca_features).copy()
+
+# Labels: prefer Mouse_ID, else filename (basename), else File
+if "Mouse_ID" in mouse_data.columns and mouse_data["Mouse_ID"].notna().any():
+    labels = mouse_data["Mouse_ID"].astype(str)
+elif "filename" in mouse_data.columns and mouse_data["filename"].notna().any():
+    labels = mouse_data["filename"].astype(str).apply(lambda p: os.path.basename(str(p)))
+else:
+    labels = mouse_data["File"].astype(str)
+mouse_data["Label"] = labels
+
+# Ensure grouping columns exist as strings
+for col, default in [("XGroup", "UNASSIGNED"), ("HueGroup", "ALL")]:
+    if col in mouse_data.columns:
+        mouse_data[col] = mouse_data[col].astype(str)
+    else:
+        mouse_data[col] = default
+
+# Standardize metrics and run PCA
+X = StandardScaler().fit_transform(mouse_data[pca_features].values)
+pca = PCA(n_components=2)
+pca_result = pca.fit_transform(X)
+
+pca_df = pd.DataFrame(pca_result, columns=["PC1", "PC2"])
+pca_df["Label"]    = mouse_data["Label"].values
+pca_df["XGroup"]   = mouse_data["XGroup"].values
+pca_df["HueGroup"] = mouse_data["HueGroup"].values
+
+# Loadings (top 8 by |PC1|)
+loadings = pd.DataFrame(pca.components_.T, index=pca_features, columns=["PC1", "PC2"])
+top8_features = loadings.reindex(loadings["PC1"].abs().sort_values(ascending=False).head(8).index)
+loadings_melted = top8_features[["PC1", "PC2"]].reset_index().melt(id_vars="index", var_name="PC", value_name="Loading")
+
+# ---------- Plot (1×3 grid) ----------
+fig = plt.figure(figsize=(18, 12), constrained_layout=True)
+gs = gridspec.GridSpec(
+    2, 2, figure=fig,
+    height_ratios=[0.8, 1.0],
+    width_ratios=[1.0, 0.8],
+    hspace=0.1, wspace=0.1
+)
+
+# Top: heatmap spans both columns
+ax_heat    = fig.add_subplot(gs[0, :])
+# Bottom: scatter (left) and bar (right)
+ax_scatter = fig.add_subplot(gs[1, 0])
+ax_bar     = fig.add_subplot(gs[1, 1])
+
+# 1) Heatmap of XGroup means
+sns.heatmap(
+    heatmap_scaled,
+    ax=ax_heat,
+    annot=annot_data.values,
+    fmt="",
+    cmap="Blues",
+    linewidths=0.5,
+    linecolor='gray',
+    alpha=0.5,
+    cbar=True
+)
+ax_heat.tick_params(axis='x', rotation=70)
+ax_heat.tick_params(axis='y', rotation=0)
+ax_heat.set_title("", fontsize=16, color="darkblue")
+ax_heat.set_xlabel(""); ax_heat.set_ylabel("")
+
+# 2) PCA: color by XGroup; marker encodes HueGroup
+unique_x = sorted(pca_df["XGroup"].unique())
+
+# color map for XGroup
+x_colors = {}
+if len(unique_x) >= 1: x_colors[unique_x[0]] = "dodgerblue"
+if len(unique_x) >= 2: x_colors[unique_x[1]] = "red"
+if len(unique_x) > 2:
+    cmap = cm.get_cmap("tab20", len(unique_x) - 2)
+    for i, grp in enumerate(unique_x[2:]):
+        x_colors[grp] = mcolors.to_hex(cmap(i))
+
+# marker selection for HueGroup
+all_hues = sorted([h for h in pca_df["HueGroup"].unique()])
+if len(all_hues) == 0:
+    all_hues = ["ALL"]
+if len(all_hues) == 1:
+    hue_to_marker = {all_hues[0]: ("o", "filled")}
+elif len(all_hues) == 2:
+    hue_to_marker = {all_hues[0]: ("o", "hollow"), all_hues[1]: ("o", "filled")}
+else:
+    marker_cycle = ["o", "s", "^", "D", "P", "X", "*", "v", "<", ">"]
+    hue_to_marker = {h: (marker_cycle[i % len(marker_cycle)], "filled") for i, h in enumerate(all_hues)}
+
+# draw points: loop XGroup (color), then HueGroup (marker style)
+for xg in unique_x:
+    sub_x = pca_df[pca_df["XGroup"] == xg]
+    for hg in all_hues:
+        sub = sub_x[sub_x["HueGroup"] == hg]
+        if sub.empty:
+            continue
+        marker, fill = hue_to_marker[hg]
+        if fill == "hollow":
+            ax_scatter.scatter(
+                sub["PC1"], sub["PC2"],
+                edgecolors=x_colors.get(xg, "black"), facecolors="none",
+                s=110, linewidth=1.2, marker=marker, alpha=0.85,
+                label=f"{xg} | {hg}"
+            )
+        else:  # filled
+            ax_scatter.scatter(
+                sub["PC1"], sub["PC2"],
+                color=x_colors.get(xg, "black"),
+                s=110, linewidth=0.8, marker=marker, alpha=0.85,
+                label=f"{xg} | {hg}"
+            )
+
+# point labels
+for _, row in pca_df.iterrows():
+    ax_scatter.text(
+        row["PC1"] + 0.05, row["PC2"] + 0.12, str(row["Label"]),
+        fontsize=9, color="gray", alpha=0.6, ha="center", va="bottom"
+    )
+
+ax_scatter.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+ax_scatter.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+
+# legend (dedup + sorted)
+handles, labels = ax_scatter.get_legend_handles_labels()
+pairs = sorted({(lab, h) for lab, h in zip(labels, handles)}, key=lambda x: x[0])
+if pairs:
+    sorted_labels, sorted_handles = zip(*pairs)
+    ax_scatter.legend(sorted_handles, sorted_labels, frameon=True, title="XGroup | HueGroup", fontsize=9)
+
+# 3) Loadings barplot
+sns.barplot(
+    data=loadings_melted, y="index", x="Loading",
+    hue="PC", hue_order=["PC1", "PC2"],
+    ax=ax_bar, palette=["purple", "orange"], alpha=0.5
+)
+ax_bar.set_xlabel("Loading Weight")
+ax_bar.set_title("Top 8 PC Loadings (metrics only)", fontsize=14)
+ax_bar.axvline(0, color='gray', linestyle='--', linewidth=1)
+ax_bar.set_ylabel("")
+ax_bar.legend(title="", frameon=False, fontsize=9)
+
+plt.show()
+

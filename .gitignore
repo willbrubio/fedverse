@@ -1,0 +1,10 @@
+﻿*.egg-info/
+build/
+dist/
+__pycache__/
+*.pyc
+.extract_venv/
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+TESTDIRDATA/
