@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pandas",
     "numpy",
-    "matplotlib"
+    "matplotlib",
 ]
 
 # Tells setuptools the packages live under src/ (the src-layout).

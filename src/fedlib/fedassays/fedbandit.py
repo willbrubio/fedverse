@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg  
 import seaborn as sns
 from pathlib import Path
 import re
@@ -1007,7 +1008,8 @@ def melt_bandit(bm_l3, x_group = "Genotype", hue_group = "Sex"):
 
 def define_aesthetics(long_df):
     """
-    uses a very hacky solution of relying on widget package to pass structured strings
+    uses a very hacky solution of relying on widget package to pass structured strings containing something like a 
+    dictionary defining the aesthetics.
     Arguments:
         long_df; Dataframe
             Long format dataframe of metrics 
@@ -1020,6 +1022,21 @@ def define_aesthetics(long_df):
     "dodgerblue", "red", "green", "orange", "purple",
     "brown", "pink", "gray", "olive", "cyan"]
 
+    genotype_colors = {
+        "WT":   "#7ACAFF",
+        "HET":  "#9BDF94",
+        "HOM":  "#D2ACD3",
+        "HEMI": "#FFB193",
+    }
+
+    def _default_color(group, idx):
+        """Explicitly apply genotype color if we have one else use positional default."""
+        key = str(group).strip().upper()
+        # Treat common wildtype aliases as WT so they pick up the WT hex.
+        if key in {"WILDTYPE", "CONTROL", "CTRL"}:
+            key = "WT"
+        return genotype_colors.get(key, named_defaults[idx % len(named_defaults)])
+
     # Build the ordered list of XGroup levels
     all_x_groups = long_df["XGroup"].dropna().unique().tolist()
     if not all_x_groups:
@@ -1030,14 +1047,18 @@ def define_aesthetics(long_df):
     x_checks, x_colors = {}, {}
     group_rows = []
     for i, g in enumerate(ordered_x):
-        chk = widgets.Checkbox(value=True, description=g, indent=False, layout=widgets.Layout(width="260px"))
-        col = widgets.Text(value=named_defaults[i % len(named_defaults)],
+        chk = widgets.Checkbox(value=True, description=g, indent=False, 
+                               layout=widgets.Layout(width="260px"))
+        #col = widgets.Text(value=named_defaults[i % len(named_defaults)],
+        #                layout=widgets.Layout(width="120px"))
+        col = widgets.Text(value=_default_color(g, i),
                         layout=widgets.Layout(width="120px"))
         x_checks[g] = chk
         x_colors[g] = col
         # more compact row
         group_rows.append(widgets.HBox([chk, widgets.Label(""), col],
                                     layout=widgets.Layout(align_items="center", height="28px")))
+
 
     picker = widgets.VBox(group_rows, layout=widgets.Layout(gap="2px"))
 
@@ -1751,6 +1772,25 @@ def plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path):
     """
 
     status.step("creating reverse learning plot")
+
+    out_dir = Path(root_path, "rev_learning")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_path = []
+
+    # Pull out the gene name (needed by the relabel lines below).
+    genename = bm_md["Gene"][0]
+
+    # Work on COPIES — this function runs before assemble_l4 in the pipeline,
+    # and mutating the shared rev_df / x_colors half-relabels them (HET -> gene)
+    # before assemble_l4 does its own relabel. Copy so relabeling stays local.
+    rev_df = rev_df.copy()
+    x_colors = dict(x_colors)          # shallow copy: don't pop the caller's key
+
+    ordered_x = [genename if label == "HET" else label for label in ordered_x]
+    if "HET" in x_colors:
+        x_colors[genename] = x_colors.pop("HET")
+    rev_df["Display_Group"] = rev_df["Display_Group"].replace("HET", genename)
     
     # Create the directory that will be written to
     out_dir = Path(root_path, "rev_learning")
@@ -1885,6 +1925,7 @@ def plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path):
 #!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
 def _plot_metric_display(dfm, variable, ax, x_color_map, *,
                          group_order=None, hue_order=None, ylabel=None,
+                         xlabel=None,
                          pval_fontsize=11, label_fontsize=13):
     """
     Draw ONE metric as a stripped-down bar+strip panel onto a caller-supplied
@@ -1919,6 +1960,8 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
             Legend proxy handles for the hue (Sex) levels, so the caller can
             build a single shared legend. Empty list if fewer than 2 hue levels.
     """
+
+
     dfm = dfm.copy()
 
     # Bar order: caller-provided, else fall back to the library's standard order.
@@ -1933,6 +1976,8 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
 
     # --- Bars: mean per XGroup, no seaborn error bars, alpha shared with dots ---
     bar_palette = {g: x_color_map.get(g, "tab:blue") for g in order}
+
+
     sns.barplot(
         data=dfm, x="XGroup", y="value", order=order,
         hue="XGroup", legend=False, errorbar=None,
@@ -1953,8 +1998,8 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
         ax.legend_.remove()
 
     # --- Single genotype p-value from the two-way ANOVA (matches L4 caption) ---
-    # We report the XGroup (genotype) main effect p_x, NOT per-group t-tests, so
-    # this reads e.g. "p = 0.002" / "p < 0.001" exactly like the deliverable.
+    # We report the XGroup (genotype) main effect p_x, NOT per-group t-tests
+    # this reads e.g. "p = 0.002" / "p < 0.001"
     res = _twoway_anova_full(dfm)
     if res.get("ok") and np.isfinite(res.get("p_x", np.nan)):
         ax.text(
@@ -1965,8 +2010,15 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
 
     # --- Cosmetics: no title/xlabel, metric name on y, clean spines ---
     ax.set_title("")
-    ax.set_xlabel("")
+    ax.set_xlabel(xlabel or "", fontsize=label_fontsize, )
     ax.set_ylabel(ylabel or variable, fontsize=label_fontsize)
+
+    # tile the labels
+    ax.tick_params(axis="x", labelrotation=45)
+    for lbl in ax.get_xticklabels():
+        lbl.set_ha("right")
+
+
     sns.despine(ax=ax)
 
     # Build (but do NOT place) the Sex legend proxies for the caller to use once.
@@ -2121,6 +2173,8 @@ def _plot_pleft_core(df, ax, *, line_color="dodgerblue", behaviour_label=None,
     ax.set_ylabel("P(Left)")
     ax.set_yticks([0, 0.5, 1])
     ax.set_xlabel("Trial" if show_xlabel else "")
+    
+
 
     if behaviour_label:
         # Label sits just outside the right edge, colored to match the trace.
@@ -2285,13 +2339,21 @@ def _fed_for_mouse(fed_list, metadata_df, mouse_id):
     return None
 
 
-
+def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
+    """
+    Stamp a bold panel letter (e.g. "A") just outside the top-left corner of an
+    Axes, in axes-fraction coords so it tracks the panel through any layout
+    change. 
+    dx/dy are nudges in axes fractions
+    """
+    ax.text(dx, dy, letter, transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=fontsize, fontweight="bold")
 
 
 
 #!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
-def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
-                fed_list, metadata_df, *, schematic_path=None, dpi=300):
+def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
+                fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300):
     """
     Assemble the composite "L4" deliverable figure for one knockout model:
 
@@ -2327,6 +2389,8 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
             FED session DataFrames, used to draw the two example traces directly.
         metadata_df : DataFrame
             Stitched metadata, used to map Mouse_ID -> FED session for the traces.
+        bandittype; String | None
+            accepts "bandit100" & "bandit80" in order to properly create the schematics.
         schematic_path : str | Path | None
             Optional device/behaviour image for the top-left of panel A. If None,
             that corner is left blank for manual assembly.
@@ -2337,7 +2401,7 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         out_path : Path
             Path to the saved composite PNG.
     """
-    import matplotlib.image as mpimg  # only needed if a schematic is supplied
+
 
     status.step("Assembling L4 composite figure")
 
@@ -2354,35 +2418,84 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     status.ok(f"L4 example pair -> WT: {wt_id} | {genename}: {het_id} "
               f"(acc gap {best['acc_gap']:.3f}, pellet gap {best['pellet_gap']:.1f})")
 
+
     # --- Resolve colors to a plain {group: color} dict ONCE ---
     # x_colors may hold ipywidgets (with .value) or plain strings; tolerate both.
     def _resolve(g):
         c = x_colors.get(g, None)
-        val = getattr(c, "value", c)                 # widget -> .value, else itself
+        val = getattr(c, "value", c)                 
         val = val.strip() if isinstance(val, str) else ""
         return val or "tab:blue"
     color_map = {g: _resolve(g) for g in x_colors}
-    # Carry the HET color onto the gene-named key so its bars/line stay red.
-    if "HET" in color_map:
-        color_map[genename] = color_map.pop("HET")
 
-    # --- Relabel HET -> gene name in BOTH tables (copies; don't mutate caller) ---
+
     long_df = long_df.copy()
-    long_df["XGroup"] = long_df["XGroup"].replace("HET", genename)
     rev_df = rev_df.copy()
-    rev_df["Display_Group"] = rev_df["Display_Group"].replace("HET", genename)
 
-    # Canonical order: WT first, then the gene. Controls both bar order and which
-    # line draws on top; WT (blue) over the gene (red), matching the deliverable.
-    group_order = ["WT"] + [g for g in [genename] if g != "WT"]
+    # Preferred left-to-right order of zygosities after WT, and their pretty form.
+    zygotic_order = ["HET", "HOM", "HEMI"]
+    zyg_display   = {"HET": "Het", "HOM": "Hom", "HEMI": "Hemi"}
 
+    present = long_df["XGroup"].dropna().unique().tolist()
+    non_wt  = [g for g in present if str(g).upper() != "WT"]
+    multi   = len(non_wt) > 1                      # drives the labeling convention
+
+    if not multi:
+        # Single mutant -> bare gene name shown on the bar itself.
+        relabel = {g: genename for g in non_wt}
+    else:
+        # Multiple mutants -> zygosity on the bar; gene name goes on the x-axis.
+        relabel = {g: zyg_display.get(str(g).upper(), str(g).title()) for g in non_wt}
+
+    long_df["XGroup"] = long_df["XGroup"].replace(relabel)
+    rev_df["Display_Group"] = rev_df["Display_Group"].replace(relabel)
+
+    # --- Order: WT first, then mutants by zygotic_order (unknowns sort last) ---
+    def _zygo_rank(orig_label):
+        up = str(orig_label).upper()
+        return zygotic_order.index(up) if up in zygotic_order else len(zygotic_order)
+
+    non_wt_sorted = sorted(non_wt, key=_zygo_rank)
+    group_order = ["WT"] + [relabel[g] for g in non_wt_sorted]
+
+    # --- Resolve colors keyed to the FINAL display labels ---
+    # x_colors keys are inconsistent upstream (raw "HOM"/"HEMI" but bare "FMR1"
+    # for het), so for each final label we try several candidate source keys,
+    # case-insensitively, before falling back.
+    def _resolve_widget(entry):
+        val = getattr(entry, "value", entry)          # widget -> .value, else itself
+        val = val.strip() if isinstance(val, str) else ""
+        return val or None
+
+    xc_norm = {}                                      # UPPER(source key) -> color
+    for k, v in x_colors.items():
+        c = _resolve_widget(v)
+        if c:
+            xc_norm[str(k).upper()] = c
+
+    # Recover each final label's ORIGINAL raw zygosity so we can try it as a key.
+    final_to_orig = {new: old for old, new in relabel.items()}
+    final_to_orig["WT"] = "WT"
+
+    def _color_for(final_label):
+        orig = final_to_orig.get(final_label, final_label)
+        # try: raw zygosity ("HOM"), the bare gene ("FMR1", covers het), then the
+        # display label itself, then a visible default.
+        for cand in (orig, genename, final_label):
+            hit = xc_norm.get(str(cand).upper())
+            if hit:
+                return hit
+        return "tab:blue"
+
+    color_map = {g: _color_for(g) for g in group_order}
     # One controlled Sex order shared by every bar panel so dot colors line up.
     hue_order = _order_hue_groups(long_df["HueGroup"].dropna().unique().tolist())
 
 
 
     # ---------------- Figure + grid layout ----------------
-    # Row 0: panel A. Row 1: line plot (wide) + four equal-width bars.
+    # Row 0: panel A. 
+    # Row 1: line plot (wide) + four equal-width bar plots.
     fig = plt.figure(figsize=(16, 8))
     gs = fig.add_gridspec(
         nrows=2, ncols=5,
@@ -2392,30 +2505,55 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     )
 
 
-    # --- Panel A: schematic (left) + two stacked example traces (right) ---
+    ##### Panel A  #####
+    # schematic (left) + two stacked example traces (right)
     # Nested grid so the top row can hold both the image and the two traces.
-    gs_a = gs[0, :].subgridspec(2, 2, width_ratios=[1, 2.5], hspace=0.25, wspace=0.08)
-
-
+    gs_a = gs[0, :].subgridspec(
+        2, 3, 
+        width_ratios=[1, 2, 0.3], 
+        hspace=0.25, wspace=0.08)
 
     # Schematic spans both sub-rows on the left; blank if no image supplied.
-    schematic_path=fedassets.get("bandit_schematic.jpg")
+    # find what bandit version
+    bt = str(bandittype).strip().lower()
+    bandit80_dict = {"bandit80", "80"}
+    bandit100_dict = {"bandit100", "100"}
+    
+    if bt in bandit80_dict:
+        schematic_path=fedassets.get("bandit80_schematic.jpg")
+    elif bt in bandit100_dict:
+        schematic_path=fedassets.get("bandit100_schematic.jpg")
+    else:
+        # fail loudly
+        raise ValueError(
+            f"Unrecognized bandittype {bandittype!r}; "
+            f"expected one of {sorted(bandit80_dict | bandit100_dict)}."
+        )
 
+    # add the bandit schematic
     ax_schem = fig.add_subplot(gs_a[:, 0])
     ax_schem.axis("off")
+    _panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
 
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
+    # add genename label at title
     ax_schem.set_title(genename, loc="left", fontsize=20, fontweight="bold")
 
 
-
+    ### Switching plots ###
     # Two example traces, drawn directly onto their axes (no PNG round-trip).
     # (Mouse_ID, right-margin label, genotype color, show x-label on bottom only)
+    het_raw = next((g for g in non_wt if str(g).upper() == "HET"), None)
+    het_display = relabel.get(het_raw, genename)
+    het_color = color_map.get(het_display, "tab:blue")
+
+    # Label reads "<gene> behaviour" (bare gene), matching the figure.
     trace_specs = [
-        (wt_id,  "Wildtype behaviour",     color_map["WT"],       False),
-        (het_id, f"{genename} behaviour",  color_map[genename],   True),
+        (wt_id,  "Wildtype behaviour",    color_map["WT"], False),
+        (het_id, f"{genename} behaviour", het_color,       True),
     ]
+
     for row, (mid, label, col, show_x) in enumerate(trace_specs):
         ax_tr = fig.add_subplot(gs_a[row, 1])
         fed = _fed_for_mouse(fed_list, metadata_df, mid)
@@ -2429,13 +2567,22 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
 
-    # --- Panel B-left: reverse-learning line plot ---
+    ##### Panel B-left: reverse-learning line plot #####
     ax_line = fig.add_subplot(gs[1, 0])
-    _rev_learning_core(rev_df, ax_line, palette_map=color_map, group_order=group_order)
+    _panel_label(ax_line, "B)")          
+    _rev_learning_core(rev_df, ax_line, 
+                       palette_map = color_map, 
+                       group_order = group_order)
+
+    if multi:
+        leg = ax_line.get_legend()
+        if leg is not None:
+            for txt in leg.get_texts():
+                if txt.get_text().upper() != "WT":
+                    txt.set_text(f"{genename} {txt.get_text()}")
 
 
-
-    # --- Panels B-bar / C / D / E: the four scalar metrics, in figure order ---
+    ##### Panels B-bar / C / D / E: metrics#####
     # (long_df variable name, y-axis label shown on the panel)
     metric_specs = [
         ("PeakAccuracy", "Peak Accuracy %"),
@@ -2444,12 +2591,15 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         ("Lose-shift",   "Lose-shift"),
     ]
 
-
-
+    # specify the panel letters for each bar plot metric
+    bar_panel_letters = {2: "C)", 3: "D)", 4: "E)"}
 
     shared_handles = []
     for col, (metric, ylabel) in enumerate(metric_specs, start=1):
         ax_bar = fig.add_subplot(gs[1, col])
+        # assign bar plot panels
+        if col in bar_panel_letters:
+            _panel_label(ax_bar, bar_panel_letters[col])
         sub = long_df[long_df["variable"] == metric]
         # Guard: a model missing a metric shouldn't crash the whole composite.
         if sub["value"].dropna().empty:
@@ -2459,12 +2609,11 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         handles = _plot_metric_display(
             sub, metric, ax_bar, color_map,
             group_order=group_order, hue_order=hue_order, ylabel=ylabel,
+            xlabel=(genename if multi else ""),
         )
         # Keep the first non-empty proxy set for the single shared legend.
         if handles and not shared_handles:
             shared_handles = handles
-
-
 
     # --- One shared Sex legend for the whole figure (top-right) ---
     if shared_handles:
@@ -2474,7 +2623,7 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
             bbox_to_anchor=(0.95, 0.35),
         )
 
-
+    
 
     # --- Caption block beneath the panels ---
     # Assembled line-by-line (each string ends with a space) so the joins never
@@ -2490,8 +2639,11 @@ def assemble_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     )
     fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
 
+
+    
+
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.2)
+    fig.subplots_adjust(bottom=0.22)
 
     out_path = out_dir / f"{genename}_L4.png"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
@@ -2523,7 +2675,7 @@ class BanditResult:
     l4_path: Path
 
 
-def run_bandit_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
+def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None, dpi=300):
     """Run the full Bandit pipeline from an L1 zip to the L4 composite figure.
 
     Orchestration only — every step delegates to the existing public
@@ -2531,20 +2683,24 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
 
     Args:
         l1_path, key_path, root_path : the three inputs your notebook sets by hand.
-        colors : optional {group: color} override. If None, falls back to
+        bandittype; String | None
+            accepts "bandit100" & "bandit80" in order to properly create the schematics.
+        colors; optional {group: color} override. If None, falls back to
             define_aesthetics' defaults so the function runs headless (no widget
             interaction required).
-        dpi : save resolution passed through to assemble_l4.
+        dpi; int 
+            save resolution passed through to assemble_l4.
+
     """
     root_path = Path(root_path)
 
-    # --- Ingest + key (was cell 4) ---
+    # --- Ingest + key  ---
     fed_list, loaded_files, session_types = core.ingest_l1(l1_path)
     key_df, msg = core._read_key_from_upload(key_path)
     key_df2 = core.build_or_rematch_key_df(loaded_files, session_types, key_df,
                                            msg_hint=f"Key status: {msg}")
 
-    # --- Individual plots + metrics -> L3 (cells 5-6) ---
+    # --- Individual plots + metrics -> L3 ---
     metadata_df = clean_key_filename_column(key_df2)
     _plot_file_core(fed_list, metadata_df, root_path)
     md = build_bandit_metakey(metadata_df)
@@ -2553,10 +2709,11 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     bm_md = attach_meta_bm(bm, md, id_col)
     l3_path = output_l3(bm_md, id_col, other_id, root_path)
 
-    # --- Barplots (cell 7) ---
+    # --- Barplots ---
     mapped_df = build_group_selections(md)
     bm_plot = merge_group_selections(bm_md, mapped_df)
     bm_long = melt_bandit(bm_plot)
+
     # Honor a caller-supplied palette; otherwise use the aesthetics defaults.
     x_checks, x_colors, ordered_x = define_aesthetics(bm_long)
     if colors is not None:
@@ -2566,9 +2723,9 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     # --- Peak accuracy + L4 composite (cells 8-9) ---
     basenames, xgroups = prep_pa_groups(mapped_df)
     rev_df = build_rev_df(fed_list, xgroups, basenames)
-    plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path)
-    l4_path = assemble_l4(bm_long, rev_df, x_colors, ordered_x, bm_md,
-                          root_path, fed_list, metadata_df, dpi=dpi)
+    #plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path)
+    l4_path = assemble_bandit_l4(bm_long, rev_df, x_colors, ordered_x, bm_md,
+                          root_path, fed_list, metadata_df, bandittype = bandittype, dpi=dpi)
 
     return BanditResult(fed_list, metadata_df, bm_md, bm_long, rev_df,
                         l3_path, barplot_paths, l4_path)

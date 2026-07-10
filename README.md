@@ -15,6 +15,7 @@ This library consists of sub libraries in this specific heiarchy:
 |   ├──fedbandit.py
 |   ├──fedpr1.py
 |   └──fedfr1.py
+├──fedassets
 ├──fedcore
 |   └──core.py
 ├──fedutils
@@ -32,5 +33,5 @@ sublibrary contains code from Murrell shared across all assay types used to read
 fedutils:
 sublibrary contains utility functions to help deliver structured messages throughout the library.
 
-
+## AI Attribution
 

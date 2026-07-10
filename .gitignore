@@ -9,3 +9,4 @@ __pycache__/
 .vscode/
 TESTDIRDATA/
 *.ps1
+push2git.txt
