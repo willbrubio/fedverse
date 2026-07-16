@@ -2,7 +2,9 @@
 
 The purpose of fedlib is to create a unifying package of libraries that concern themselves with the analysis of FED devices in conjunction with the established workflow for the SSPsyGene project. Currently, fedlib inherits functions from fed3bandit written by Alex Legaria (https://fed3bandit.readthedocs.io/en/latest/analysis/fed3live_api.html) and the fed3 library written by Tom Earnest (https://earnestt1234.github.io/fed3/fed3/index.html). Additionally, this library includes code written for FED3Analyses by Chantelle Murrell (https://github.com/KravitzLab/FED3Analyses). 
 
-This library was created for the intention of being used in conjunction with the analysis pipeline for the WUSMAC SSPsyGene analysis pipeline of FED devices. 
+This library was created for the intention of of automating a analysis pipeline for the WUSMAC SSPsyGene analysis of FED devices. 
+
+The pipeline created by this library is meant to ingest L1 files alongside their key file and automate the process of creating an L4. Anything besides that functionality is outside the scope of the intended pipeline. 
 
 ## Sub Library Architecture
 This library consists of sub libraries in this specific heiarchy:
@@ -33,5 +35,9 @@ sublibrary contains code from Murrell shared across all assay types used to read
 fedutils:
 sublibrary contains utility functions to help deliver structured messages throughout the library.
 
+
+
 ## AI Attribution
+Code was written with Assistance using generative AI. 
+ver: Claude Opus 4.8
 
