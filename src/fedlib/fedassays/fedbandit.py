@@ -39,15 +39,16 @@ BANDIT_META_COLS = ["Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", "C
 
 # Define exclusions for group plotting
 exclude_lower = {"match_status"} # everything else is allowed
+ALPHA = 0.6
 
-# Set the alpha for plots
-ALPHA = 0.6  # apply to both bars and dots
 
 # Define hue order priority
 HUE_PRIORITY = ["Female", "Male", "F", "M", "Day", "Night", "Light", "Dark", "ALL", "UNASSIGNED"]
 
 # for peak accuracy
 TRIALS = 11 
+
+
 
 #@@@@@@@@@@@@@@@@@@ Bandit Plotting @@@@@@@@@@@@@@@@@@#
 ### ------ General Helper functions ------- ###
@@ -86,15 +87,6 @@ def _coerce_numeric_col(df, col, clip_upper=None, na_map=None):
     if clip_upper is not None:
         s.loc[s > clip_upper] = np.nan
     df[col] = s
-
-
-
-
-
-
-
-
-
 
 
 ### ------- Main Plotting Function ------ ###
@@ -222,32 +214,7 @@ def _plot_file_core(fed_list, metadata_df, root_path, dpi=150):
 #@@@@@@@@@@@@@@@@@@ Build Bandit L3 @@@@@@@@@@@@@@@@@@#
 
 ### ------ General Helper functions ------ ###
-def _clean_colname(c):
-    """
-    Cleans column name, called typiclly within a loop to clean all columnnames 
-    Called by:
-        build_bandit_metakey
-    Argument:
-        c; string
-            string of column name
-    """
-    c = str(c).strip()
-    c = c.replace("$", "")
-    c = re.sub(r"\s+", "_", c)
-    c = re.sub(r"_+", "_", c)
-    return c
 
-
-def _basename(pathlike) -> str:
-    """
-    Argument:
-        pathlike; string
-            string of path
-    Returns:
-        basename from a path
-    """
-    s = str(pathlike).replace("\\", "/")
-    return s.split("/")[-1]
 
 def _file_base_lower(pathlike):
     """
@@ -277,23 +244,9 @@ def _prep_events(df):
     return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
 
 
-def _get_timestamp_series(df, ts_col="MM:DD:YYYY hh:mm:ss"):
-    if ts_col in df.columns:
-        ts = pd.to_datetime(df[ts_col], format="%m:%d:%Y %H:%M:%S", errors="coerce")
-        return pd.Series(ts, index=df.index)
-    for cand in ["DateTime", "Datetime", "Timestamp", "timestamp", "datetime"]:
-        if cand in df.columns:
-            ts = pd.to_datetime(df[cand], errors="coerce")
-            return pd.Series(ts, index=df.index)
-    idx = df.index
-    if isinstance(idx, pd.DatetimeIndex):
-        return pd.Series(idx, index=df.index)
-    return pd.to_datetime(pd.Series(idx, index=df.index), errors="coerce")
-
-
 def _split_day_night(df, ts_col="MM:DD:YYYY hh:mm:ss"):
     """Day: 07:00–19:00; Night: otherwise."""
-    ts = _get_timestamp_series(df, ts_col=ts_col)
+    ts = core._get_timestamp_series(df, ts_col=ts_col)
     valid = ts.notna()
     hrs = ts.dt.hour
     day_mask = valid & (hrs >= 7) & (hrs < 19)
@@ -306,7 +259,7 @@ def compute_withinbout_lose_shift(c_df, max_gap_s=120):
         if "Event" not in c_df.columns or len(c_df) < 2:
             return np.nan
         events = c_df["Event"].to_numpy()
-        times = _get_timestamp_series(c_df).to_numpy()
+        times = core._get_timestamp_series(c_df).to_numpy()
         total = shifted = 0
         for i in range(len(events) - 1):
             curr_evt, next_evt = events[i], events[i + 1]
@@ -331,7 +284,7 @@ def compute_withinbout_win_stay(c_df, max_gap_s=120):
         if "Event" not in c_df.columns or len(c_df) < 3:
             return np.nan
         events = c_df["Event"].to_numpy()
-        times = _get_timestamp_series(c_df).to_numpy()
+        times = core._get_timestamp_series(c_df).to_numpy()
         pellet_idx = [i for i in range(1, len(events) - 1) if events[i] == "Pellet"]
         total = same = 0
         for i in pellet_idx:
@@ -356,30 +309,6 @@ def compute_peak_accuracy(c_df):
     except Exception:
         return np.nan
 
-
-def estimate_daily_pellets(c_df):
-    ts = _get_timestamp_series(c_df)
-    valid_ts = ts.dropna()
-    if valid_ts.size < 2:
-        return np.nan
-    duration_hours = (valid_ts.max() - valid_ts.min()).total_seconds() / 3600.0
-    if duration_hours <= 0:
-        return np.nan
-
-    pellet_events = np.nan
-    if "Pellet_Count" in c_df.columns and c_df["Pellet_Count"].notna().any():
-        pc = pd.to_numeric(c_df["Pellet_Count"], errors="coerce")
-        if pc.notna().any():
-            diffs = pc.diff().fillna(0).clip(lower=0)
-            pellet_events = float(diffs.sum())
-            if pellet_events == 0 and pc.iloc[-1] >= pc.iloc[0]:
-                pellet_events = float(pc.iloc[-1] - pc.iloc[0])
-    if (pd.isna(pellet_events)) and ("Event" in c_df.columns):
-        pellet_events = float((c_df["Event"] == "Pellet").sum())
-
-    if pd.isna(pellet_events):
-        return np.nan
-    return (pellet_events / duration_hours) * 24.0
 
 
 def compute_inactive_pokes(c_df):
@@ -408,81 +337,16 @@ def compute_active_pokes(c_df):
         return np.nan
     
 
-### ------ Create bandit firendly key ------ ### 
-def build_bandit_metakey(key_df):
-    """
-    Crops the metadatakey for the bandit analtsis workflow.
-    Argument:
-        key_df; Dataframe
-            A dataframe contating meta information of the mice assayed via a FED (bandit) device.
-    Returns:
-        md; Dataframe
-            Cropped version of ingested dataframe
-    """
-    metadata_df = key_df.copy().reset_index(drop=True)
-    # Clean every column name
-    metadata_df.columns = [_clean_colname(c) for c in metadata_df.columns]
-    
-    if "filename" in metadata_df.columns:
-        metadata_df["filename"] = metadata_df["filename"].astype(str).map(os.path.basename).map(_basename)
-    if "Mouse_ID" in metadata_df.columns:
-        metadata_df["Mouse_ID"] = metadata_df["Mouse_ID"].astype(str).str.strip()
-    
-    
-    
-    lower_map = {c.lower(): c for c in metadata_df.columns}
-    rename_map = {}
-    for w in BANDIT_META_COLS:
-        c = lower_map.get(w.lower(), None)
-        if c is not None and c != w:
-            rename_map[c] = w
-    metadata_df = metadata_df.rename(columns=rename_map)
-    
-    merge_cols = [c for c in ["filename", "Mouse_ID"] if c in metadata_df.columns]
-    naming_cols = [c for c in ["Session_type", "Gene_ID", "Strain_ID"] if c in metadata_df.columns]
-    keep_cols = list(dict.fromkeys(merge_cols + [c for c in BANDIT_META_COLS if c in metadata_df.columns] + naming_cols))
-    metadata_df = metadata_df.loc[:, keep_cols].copy()
-    
-    md = metadata_df.copy()
-    if "filename" in md.columns:
-        md["filename"] = md["filename"].astype(str).map(_basename)
-    if "Mouse_ID" in md.columns:
-        md["Mouse_ID"] = md["Mouse_ID"].astype(str).str.strip()
-
-    return md
 
 
-def pick_match_method(md, match_mode=None):
-    """
-    Picks what the id key column is from the metadata df
-    Argument:
-        md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_bandit_metakey
-        match_mode; str, default None
-            accepts string argument specifying what column will be used as the id column. should be either mouse_id or filename
-    Returns:
-        id_col; string
-            String detailing what column will serve as the key column to link both metadata and metric files
-        other_id; string
-            String detailing fallback key column to link metadata and metrics dataframes
-    """
-    
-    if match_mode == 'filename':
-        id_col = 'filename'
-    elif match_mode == 'mouse_id':
-        id_col = 'Mouse_ID'
-    else:
-        id_col = 'Mouse_ID' if 'Mouse_ID' in md.columns else 'filename'
 
-    other_id = "Mouse_ID" if id_col == "filename" else "filename"
 
-    return id_col, other_id
 
 
 ### --- crunch the numbers --- ###
 def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
     """
-    Computes the metrics from the badnit tasks
+    Computes the metrics from the bandit tasks
     Arguments:
         fed_list; List
             List contating multiple FED Dataframes
@@ -501,7 +365,7 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
 
     for idx in tqdm.tqdm(range(len(fed_list))):
         c_df = fed_list[idx]
-        file_name = _basename(getattr(c_df, "name", f"File_{idx}"))
+        file_name = core._basename(getattr(c_df, "name", f"File_{idx}"))
         d, ev = _prep_events(c_df)
 
 
@@ -548,7 +412,7 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
                 "PokeTime": clean_poke_time.median() if not clean_poke_time.empty else np.nan,
                 "Win-stay": compute_withinbout_win_stay(c_df),
                 "Lose-shift": compute_withinbout_lose_shift(c_df),
-                "Daily_Pellets": estimate_daily_pellets(c_df),
+                "Daily_Pellets": core._estimate_daily_pellets(c_df),
                 "Inactive_Pokes": compute_inactive_pokes(c_df),
                 "Active_Pokes": compute_active_pokes(c_df),
                 "Left Poke with Pellet": lwp,
@@ -586,1076 +450,25 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
 
 
 
-### ------ Attach metadata to bandit metrics ------ ###
-def attach_meta_bm(bm_df, md, id_col):
-    """
-    Attaches cropped bandit metadata dataframe to the aggragated bandit metric dataframe
 
-    Arguments:
-        bm; Dataframe
-            Dataframe containing aggragated bandit metrics for multiple mice in a Bandit assay by a FED device
-        md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_bandit_metakey
-        id_col; String, default "Mouse_ID"
-            String detailing what column will serve as the key column   
-    Returns:
-        bm_md; Dataframe    
-            Dataframe containing aggregated metrics with metadata
-    """
 
-    status.step("Attaching metadata to bandit metrics")
-    bm = bm_df.copy()
 
-    if "filename" in md.columns and "Mouse_ID" in md.columns:
-        mouse_map = md.dropna(subset=["filename"]).drop_duplicates("filename").set_index("filename")["Mouse_ID"]
-        bm["Mouse_ID"] = bm["filename"].map(mouse_map)
 
-        if bm["Mouse_ID"].isna().any():
-            known_ids = md["Mouse_ID"].dropna().unique().tolist()
-            for i, r in bm.loc[bm["Mouse_ID"].isna()].iterrows():
-                base = _file_base_lower(r["filename"])
-                hits = [mid for mid in known_ids if str(mid).lower() in base]
-                if len(hits) == 1:
-                    bm.at[i, "Mouse_ID"] = hits[0]
-                elif len(hits) > 1:
-                    longest = max(len(str(h)) for h in hits)
-                    best = [h for h in hits if len(str(h)) == longest]
-                    if len(best) == 1:
-                        bm.at[i, "Mouse_ID"] = best[0]
 
-    if (id_col == "Mouse_ID") and ("Mouse_ID" in bm.columns) and ("Mouse_ID" in md.columns) and bm["Mouse_ID"].notna().any():
-        md_unique = md.drop_duplicates(subset=["Mouse_ID"], keep="first")
-        bm_md = bm.merge(md_unique, on="Mouse_ID", how="left", suffixes=("", "_md"))
-    else:
-        if "filename" not in md.columns:
-            raise ValueError("metadata_df has no 'filename' column, but filename is needed for this mode.")
-        md_unique = md.drop_duplicates(subset=["filename"], keep="first")
-        bm_md = bm.merge(md_unique, on="filename", how="left", suffixes=("", "_md"))
 
-    status.ok("metadata attached")
-    status.preview(bm_md, msg="merged bandit metric dataframe")
-    return bm_md
-
-
-
-### ------ Define session type suffixing ------ ###
-def output_l3(bm_md, id_col, other_id, root_path):
-    """
-    Arguemnts:
-        bm_md; Dataframe
-            Dataframe containing aggregated metrics with metadata
-        id_col; string
-            String detailing what column will serve as the key column to link both metadata and metric files
-        other_id; string
-            String detailing fallback key column to link metadata and metrics dataframes
-    """
-
-    status.step("Preparing L3")
-
-    # prepare the L3 Directory for population
-    status.sub("Creating L3 directory")
-    out_dir = Path(root_path, "L3")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    status.ok("L3 directory created")
-
-    bm = bm_md.copy()
-
-    metric_cols = [
-        "Win-stay", "Lose-shift", "PeakAccuracy", "Total_pellets", "Total_pokes",
-        "PokesPerPellet", "RetrievalTime", "PokeTime", "Daily_Pellets",
-        "Inactive_Pokes", "Active_Pokes", "Weight",
-        "Win-stay_Day", "Win-stay_Night", "Lose-shift_Day", "Lose-shift_Night",
-        "PeakAccuracy_Day", "PeakAccuracy_Night","Left Poke with Pellet","Right_Poke",
-    ]
-
-    if "Session_type" in bm.columns:
-        session_series = bm["Session_type"].astype(str).str.strip()
-    else:
-        sess_map = {
-            _basename(getattr(_sessions[i], "name", f"File_{i}")):
-            (_sessions[i].attrs.get("Session_type") or "Unknown")
-            for i in range(len(_sessions))
-        }
-        session_series = bm["filename"].map(sess_map).fillna("Unknown").astype(str)
-
-    session_series = session_series.str.replace(r"\s+", "_", regex=True)
-    bm["_Session_type_for_csv"] = session_series
-
-    def with_session_suffix_for_csv(df, metrics=metric_cols, session_col="_Session_type_for_csv"):
-        df = df.copy()
-        for m in metrics:
-            if m not in df.columns:
-                continue
-            for sess in df[session_col].dropna().unique():
-                mask = df[session_col] == sess
-                col_name = f"{m}_{sess}"
-                if col_name not in df.columns:
-                    df[col_name] = np.nan
-                df.loc[mask, col_name] = df.loc[mask, m]
-            df.drop(columns=[m], inplace=True)
-        return df.drop(columns=[session_col])
-
-    Banditmetrics_merged = bm.copy()
-    Banditmetrics_csv = with_session_suffix_for_csv(Banditmetrics_merged)
-
-    ### Prepare final export columns
-    def _metric_match(col: str) -> bool:
-        return any(col.startswith(base + "_") for base in metric_cols)
-
-    metric_keep = [c for c in Banditmetrics_csv.columns if _metric_match(c)]
-    if not metric_keep:
-        raise RuntimeError("No session-suffixed metric columns matched; check 'metric_cols'.")
-
-    meta_keep = [c for c in BANDIT_META_COLS if c in Banditmetrics_csv.columns]
-
-    drop_cols = []
-    if other_id in Banditmetrics_csv.columns:
-        drop_cols.append(other_id)
-    for c in ["File", "FileIndex"]:
-        if c in Banditmetrics_csv.columns:
-            drop_cols.append(c)
-
-    Banditmetrics_csv = Banditmetrics_csv.drop(columns=drop_cols, errors="ignore")
-
-    cols_out = [id_col] + meta_keep + metric_keep
-    cols_out = [c for c in cols_out if c in Banditmetrics_csv.columns]
-    Banditmetrics_csv = Banditmetrics_csv.loc[:, cols_out].copy()
-
-    ### get name of file
-    example = Banditmetrics_merged.iloc[0]
-
-    strain_name = str(example.get("Gene", example.get("Strain", "NA"))).replace(" ", "_")
-    strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "NA"))
-    try:
-        strain_num = f"{int(strain_num_raw):03d}"
-    except Exception:
-        strain_num = str(strain_num_raw).zfill(3)
-
-    task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
-    fname = f"{strain_name}_{strain_num}_{task_name}_L3.csv"
-
-    # Return 
-    status.ok("L3 prepared")
-    status.preview(bm_md, msg="L3 Dataframe")
-
-    out_path = out_dir / fname
-    Banditmetrics_csv.to_csv(out_path, index=False)
-
-    return(Banditmetrics_csv)
-
-
-
-
-#@@@@@@@@@@@@@@@@@@ Determine groups for plotting later @@@@@@@@@@@@@@@@@@#
-# helps to determine grouping for downstream plotting
-
-
-### ------ General Helper functions ------ ###
-def build_mapping(md, ordered_cols):
-    """
-    Arguments:
-        md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_bandit_metakey
-    """
-    _meta = md.copy()
-    #_meta = metadata_df.copy()
-    
-    _meta["filename"] = _build_file_column(_meta)
-    _meta["Group"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols), axis=1)
-    mapping = (
-        _meta[["filename", "Group"]]
-        .dropna(subset=["filename"])
-        .drop_duplicates()
-        .sort_values(["Group", "filename"])
-        .reset_index(drop=True)
-    )
-    return mapping
-
-
-def _build_file_column(df):
-    if "filename" in df.columns:
-        return df["filename"].apply(lambda p: os.path.basename(str(p)))
-    if "FED3_from_file" in df.columns and "Date_from_file" in df.columns:
-        return "FED" + df["FED3_from_file"].astype(str) + "_" + df["Date_from_file"].astype(str)
-    if "FED3_from_file" in df.columns:
-        return "FED" + df["FED3_from_file"].astype(str)
-    return df.index.astype(str)
-
-
-def _build_group_row(row, ordered_cols):
-    if not ordered_cols:
-        return "ALL"
-    return " | ".join(_norm_val(row[c]) for c in ordered_cols)
-
-
-def _norm_val(x):
-    s = str(x).strip()
-    if s == "" or s.lower() in {"nan", "none"}:
-        return "UNK"
-    return s.upper()
-
-
-### ------ Main functions ------ ###
-
-def build_group_selections(md, right_x = ["Genotype"], right_hue = ["Sex"]):
-    """
-    Arguments:
-        md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_bandit_metakey
-        right_x; List
-            List of metadata columns selected to define main plotting purposes
-        right_hue; List
-            List of metadata columns selected to define supplementary plotting purposes
-
-    Returns:
-        mapping_both; Dataframe
-            Dataframe mapping filenames what category the file is based on mapping groupings.
-    """
-
-    status.step("Building group selection dataframe")
-    
-    ordered_cols_x = list(right_x)
-    ordered_cols_hue = list(right_hue)
-    #ordered_cols_x = list(right_x.options)
-    #ordered_cols_hue = list(right_hue.options)
-
-    mapping_x = build_mapping(md, ordered_cols_x)
-    mapping_hue = build_mapping(md, ordered_cols_hue)
-
-    _meta = md.copy()
-    #_meta = metadata_df.copy()
-    
-    _meta["filename"] = _build_file_column(_meta)
-    _meta["XGroup"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols_x), axis=1)
-    _meta["HueGroup"] = _meta.apply(lambda r: _build_group_row(r, ordered_cols_hue), axis=1)
-    mapping_both = (
-        _meta[["filename", "XGroup", "HueGroup"]]
-        .dropna(subset=["filename"])
-        .drop_duplicates()
-        .sort_values(["XGroup", "HueGroup", "filename"])
-        .reset_index(drop=True)
-    )
-
-    globals()['files_to_group_x'] = mapping_x.copy()
-    globals()['files_to_group_hue'] = mapping_hue.copy()
-    globals()['files_to_group_both'] = mapping_both.copy()
-    globals()['selected_group_cols_x'] = ordered_cols_x.copy()
-    globals()['selected_group_cols_hue'] = ordered_cols_hue.copy()
-
-    status.ok(f"X-axis grouping (hierarchy): {ordered_cols_x if ordered_cols_x else ["ALL"]}")
-    status.ok(f"Total unique files (X map): {mapping_x['filename'].nunique()}")
-    #display(widgets.HTML("<b>X-group summary</b>"))
-    status.table((mapping_x.groupby("Group", dropna=False)["filename"]
-             .nunique().sort_values(ascending=False)
-             .rename("UniqueFiles").to_frame()))
-
-    status.ok(f"Hue grouping: {ordered_cols_hue if ordered_cols_hue else ["ALL"]}")
-    status.ok(f"Total unique files (Hue map): {mapping_hue['filename'].nunique()}")
-    #display(widgets.HTML("<b>Hue-group summary</b>"))
-    status.table((mapping_hue.groupby("Group", dropna=False)["filename"]
-             .nunique().sort_values(ascending=False)
-             .rename("UniqueFiles").to_frame()))
-    #print("\nCombined mapping available as `files_to_group_both` (filename, XGroup, HueGroup)")
-
-    status.ok("Grouping dataframe built")
-
-    return mapping_both
-
-
-
-
-
-def merge_group_selections(bm, mapping_both):
-    """
-    Attempts to merge in grouping selections to the bandit metrics for plotting purposes later
-
-    Arguments:
-        bm; Dataframe
-            Dataframe merged with metadata; not L3 dataframe
-    """
-
-    status.step("Merging group df and metric df")
-
-    if ("XGroup" not in bm.columns) or ("HueGroup" not in bm.columns):
-        if 'files_to_group_both' in globals() and files_to_group_both is not None and not files_to_group_both.empty:
-            m = files_to_group_both.copy()
-            m_src = _src_name(m)
-            if m_src is None:
-                raise RuntimeError("Grouping table must include 'filename' (or legacy 'File').")
-            m["file_base"]  = m[m_src].apply(_basename_col)
-            bm["file_base"] = bm["filename"].apply(_basename_col)
-            bm = bm.merge(m[["file_base","XGroup","HueGroup"]], on="file_base", how="left").drop(columns=["file_base"])
-            bm["XGroup"]   = bm["XGroup"].fillna("UNASSIGNED")
-            bm["HueGroup"] = bm["HueGroup"].fillna("UNASSIGNED")
-        elif 'files_to_group' in globals() and files_to_group is not None and not files_to_group.empty:
-            m = files_to_group.copy()
-            m_src = _src_name(m)
-            if m_src is None:
-                raise RuntimeError("Grouping table must include 'filename' (or legacy 'File').")
-            m["file_base"]  = m[m_src].apply(_basename_col)
-            bm["file_base"] = bm["filename"].apply(_basename_col)
-            bm = bm.merge(m[["file_base","Group"]], on="file_base", how="left").drop(columns=["file_base"])
-            bm["Group"] = m["Group"].fillna("UNASSIGNED")
-            bm["XGroup"] = bm["Group"]
-            bm["HueGroup"] = "ALL"
-        else:
-            raise RuntimeError("Missing X/Hue mapping. Run the grouping widget (Build Groups) first.")
-        
-        status.ok("Group and Metric dataframe merged")
-        return bm
-
-
-
-
-
-
-
-#@@@@@@@@@@@@@@@@@@ Plot groups @@@@@@@@@@@@@@@@@@#
-
-### ------ General Helper functions ------ ###
-def _basename_col(s):
-    return os.path.basename(str(s))
-
-def _src_name(df):
-    if "filename" in df.columns:
-        return "filename"
-    return None
-
-def _hier_sort_key(g):
-    lv = _x_levels(g)
-    norm = []
-    for tok in lv:
-        is_blank = 1 if _is_unassigned_token(tok) else 0
-        norm.append((is_blank, str(tok).upper()))
-    wt_present = any(_is_wt_group(tok) for tok in lv) or _is_wt_group(g)
-    wt_rank = 0 if wt_present else 1
-    return (wt_rank,) + tuple(norm) + (str(g).upper(),)
-
-def _x_levels(xname):
-    s = str(xname)
-    parts = [p.strip() for p in s.split("|")]
-    wanted = globals().get("selected_group_cols_x", None)
-    if isinstance(wanted, (list, tuple)) and wanted:
-        if len(parts) < len(wanted):
-            parts += [""] * (len(wanted) - len(parts))
-        else:
-            parts = parts[:len(wanted)]
-    return parts
-
-def _is_unassigned_token(s):
-    return (str(s).strip().upper() in {"", "UNASSIGNED", "NONE", "NA", "N/A"})
-
-def _is_wt_group(g):
-    u = str(g).strip().upper()
-    tokens = [t for t in re.split(r'[^A-Z0-9]+', u) if t]
-    WT_ALIASES = {"WT", "WILDTYPE", "CONTROL", "CTRL"}
-    return any(t in WT_ALIASES for t in tokens)
-
-
-def melt_bandit(bm_l3, x_group = "Genotype", hue_group = "Sex"):
-    """
-    Melt the bandit metrics from wide to long
-
-    Arguments:
-        bm_l3; Dataframe
-            Bandit metric L3 file
-    Returns:
-        long_df; Dataframe
-            Bandit metric dataframe in a long format
-    """
-
-    status.step("Melting bandit L3 to long format")
-    bm = bm_l3.copy()
-
-    base_metric_names = [
-    "Win-stay","Lose-shift","PeakAccuracy",
-    "Total_pellets","Total_pokes","PokesPerPellet", "Weight",
-    "RetrievalTime","PokeTime","Daily_Pellets", "Left Poke with Pellet", "Right_Poke", "Inactive_Pokes", "Active_Pokes",
-    "Win-stay_Day","Win-stay_Night","Lose-shift_Day","Lose-shift_Night",
-    "PeakAccuracy_Day","PeakAccuracy_Night",
-    ]
-
-    metric_cols = []
-
-    # find all non meta feature columns
-    for c in bm.columns:
-        if pd.api.types.is_numeric_dtype(bm[c]):
-            for base in base_metric_names:
-                if c == base or c.startswith(base + "_"):
-                    metric_cols.append(c); break
-    seen = set(); metric_cols = [c for c in metric_cols if not (c in seen or seen.add(c))]
-    if not metric_cols:
-        raise RuntimeError("No numeric metric columns found among expected Bandit metrics.")
-
-    candidate_id_vars = ["Genotype","Sex","Strain","Start_Date","flename","Mouse_ID","Session_type","XGroup","HueGroup"]
-    id_vars = [c for c in candidate_id_vars if c in bm.columns]
-    for need in ["XGroup","HueGroup","filename"]:
-        if need not in id_vars: id_vars.append(need)
-
-    long_df = pd.melt(
-        bm,
-        id_vars=id_vars,
-        value_vars=metric_cols,
-        var_name="variable",
-        value_name="value"
-    )
-
-    status.ok("bandit melted")
-    return long_df
-
-
-
-
-def define_aesthetics(long_df):
-    """
-    uses a very hacky solution of relying on widget package to pass structured strings containing something like a 
-    dictionary defining the aesthetics.
-    Arguments:
-        long_df; Dataframe
-            Long format dataframe of metrics 
-    Returns:
-        x_checks;
-        x_colors; 
-        ordered_x;
-    """
-    named_defaults = [
-    "dodgerblue", "red", "green", "orange", "purple",
-    "brown", "pink", "gray", "olive", "cyan"]
-
-    genotype_colors = {
-        "WT":   "#7ACAFF",
-        "HET":  "#9BDF94",
-        "HOM":  "#D2ACD3",
-        "HEMI": "#FFB193",
-    }
-
-    def _default_color(group, idx):
-        """Explicitly apply genotype color if we have one else use positional default."""
-        key = str(group).strip().upper()
-        # Treat common wildtype aliases as WT so they pick up the WT hex.
-        if key in {"WILDTYPE", "CONTROL", "CTRL"}:
-            key = "WT"
-        return genotype_colors.get(key, named_defaults[idx % len(named_defaults)])
-
-    # Build the ordered list of XGroup levels
-    all_x_groups = long_df["XGroup"].dropna().unique().tolist()
-    if not all_x_groups:
-        raise RuntimeError("No XGroup values found – check that the grouping step ran correctly.")
-
-    ordered_x = _order_x_groups(all_x_groups)
-
-    x_checks, x_colors = {}, {}
-    group_rows = []
-    for i, g in enumerate(ordered_x):
-        chk = widgets.Checkbox(value=True, description=g, indent=False, 
-                               layout=widgets.Layout(width="260px"))
-        #col = widgets.Text(value=named_defaults[i % len(named_defaults)],
-        #                layout=widgets.Layout(width="120px"))
-        col = widgets.Text(value=_default_color(g, i),
-                        layout=widgets.Layout(width="120px"))
-        x_checks[g] = chk
-        x_colors[g] = col
-        # more compact row
-        group_rows.append(widgets.HBox([chk, widgets.Label(""), col],
-                                    layout=widgets.Layout(align_items="center", height="28px")))
-
-
-    picker = widgets.VBox(group_rows, layout=widgets.Layout(gap="2px"))
-
-    btn_all  = widgets.Button(description="Select all", layout=widgets.Layout(width="140px"))
-    btn_none = widgets.Button(description="Clear", layout=widgets.Layout(width="140px"))
-    def _set_all(val):
-        for c in x_checks.values(): c.value = val
-    btn_all.on_click(lambda _: _set_all(True))
-    btn_none.on_click(lambda _: _set_all(False))
-
-    # scrollable container for the (possibly long) group list
-    picker_container = widgets.Box([picker],
-        layout=widgets.Layout(overflow="auto", max_height="420px",
-                            border="1px solid #ddd", padding="6px", width="360px"))
-
-    left_col = widgets.VBox([
-        widgets.HTML("<b>Groups & Colors</b>"),
-        widgets.HBox([btn_all, btn_none], layout=widgets.Layout(gap="8px")),
-        picker_container
-    ], layout=widgets.Layout(width="380px"))
-
-    return x_checks, x_colors, ordered_x
-
-
-
-### ------ Stats Helper functions ------ ###
-# Pingouin p-value helper
-def _pg_get_pval(pg_res):
-    """
-    Robustly extract p-value from a Pingouin result DataFrame.
-    Works across versions that rename p-value columns.
-    """
-    if pg_res is None:
-        return np.nan
-    if not isinstance(pg_res, pd.DataFrame) or pg_res.empty:
-        return np.nan
-
-    candidates = [
-        "p-val", "p_val", "pval", "pvalue", "p_value",
-        "p-unc", "p_unc", "p", "P-val", "P_val"
-    ]
-    for c in candidates:
-        if c in pg_res.columns:
-            try:
-                return float(pg_res[c].values[0])
-            except Exception:
-                return np.nan
-
-    raise KeyError(f"Pingouin result has no known p-value column. Columns: {pg_res.columns.tolist()}")
-
-
-def _stats_text(dfm, x_label, hue_label, *, mode="ref", ref_group=None, pair_list=None):
-    df = dfm.dropna(subset=["value"]).copy()
-    g_n = df["XGroup"].nunique(dropna=True)
-    h_n = df["HueGroup"].nunique(dropna=True)
-
-    if mode == "pairs" and pair_list:
-        lines = ["Selected pairwise ANOVA tests:"]
-        for a,b in pair_list:
-            sub = df[df["XGroup"].isin([a,b])]
-            res = _anova_subset(sub)
-            if not res["ok"]:
-                lines.append(f"{a} vs {b}: {res['err'] or 'failed'}"); continue
-            if res["n_h"] >= 2:
-                lines.append(
-                    f"{a} vs {b} (Two-way: {x_label}, {hue_label})  "
-                    f"{x_label}: {_fmt_p(res['p_x'])} | {hue_label}: {_fmt_p(res['p_h'])} | "
-                    f"{x_label}×{hue_label}: {_fmt_p(res['p_int'])}"
-                )
-            else:
-                lines.append(f"{a} vs {b} (One-way {x_label}): {_fmt_p(res['p_x'])}")
-        return "\n".join(lines)
-
-    def fmt(p): return _fmt_p(p)
-    if g_n == 2 and h_n <= 1:
-        g1, g2 = sorted(df["XGroup"].unique())
-        v1 = df[df["XGroup"] == g1]["value"].dropna()
-        v2 = df[df["XGroup"] == g2]["value"].dropna()
-        if len(v1) > 1 and len(v2) > 1:
-            p = _pg_get_pval(pg.ttest(v1, v2, paired=False))
-            return f"t-test ({x_label}): {fmt(p)}\n{g1} vs {g2}"
-        return "t-test: not enough data"
-
-    if g_n >= 2 and h_n >= 2:
-        try:
-            model = ols('value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)', data=df).fit()
-            an = sm.stats.anova_lm(model, typ=2)
-            return (
-                "Two-way ANOVA\n"
-                f"{x_label}: {fmt(float(an.loc['C(XGroup)','PR(>F)']))}\n"
-                f"{hue_label}: {fmt(float(an.loc['C(HueGroup)','PR(>F)']))}\n"
-                f"{x_label}×{hue_label}: {fmt(float(an.loc['C(XGroup):C(HueGroup)','PR(>F)']))}"
-            )
-        except Exception as e:
-            return f"ANOVA failed: {e}"
-
-    if g_n >= 2:
-        try:
-            model = ols('value ~ C(XGroup)', data=df).fit()
-            return f"One-way ANOVA ({x_label}): {fmt(float(model.f_pvalue))}"
-        except Exception as e:
-            return f"One-way ANOVA failed: {e}"
-    return "Too few groups for stats"
-
-def _fmt_p(p):
-    if not np.isfinite(p): return "n/a"
-    return f"p = {p:.3f}" if p >= 0.001 else "p < 0.001"
-
-def _anova_subset(df):
-    """
-    If >=2 Hue levels: two-way ANOVA (XGroup, HueGroup, interaction)
-    Else: one-way ANOVA (XGroup).
-    """
-    out = {"p_x": np.nan, "p_h": np.nan, "p_int": np.nan, "n_h": 0, "ok": False, "err": None}
-    d = df.dropna(subset=["value","XGroup"])
-    if d.empty or d["XGroup"].nunique() < 2:
-        out["err"] = "Too few groups"; return out
-    n_h = d["HueGroup"].nunique(dropna=True); out["n_h"] = n_h
-    try:
-        if n_h >= 2:
-            model = ols('value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)', data=d).fit()
-            an = sm.stats.anova_lm(model, typ=2)
-            out["p_x"]   = float(an.loc['C(XGroup)','PR(>F)'])
-            out["p_h"]   = float(an.loc['C(HueGroup)','PR(>F)'])
-            out["p_int"] = float(an.loc['C(XGroup):C(HueGroup)','PR(>F)'])
-            out["ok"] = True
-        else:
-            model = ols('value ~ C(XGroup)', data=d).fit()
-            out["p_x"] = float(model.f_pvalue); out["ok"] = True
-    except Exception as e:
-        out["err"] = str(e)
-    return out
-
-
-
-def _fmt_p_num(p):
-    if p is None or (isinstance(p, float) and (not np.isfinite(p))):
-        return "n/a"
-    p = float(p)
-    return f"{p:.4f}" if p >= 0.0001 else "<0.0001"
-
-def _fmt_F(df_num, df_den, F):
-    if df_num is None or df_den is None or F is None:
-        return "n/a"
-    if not np.isfinite(F):
-        return "n/a"
-    return f"F({int(df_num)}, {int(df_den)}) = {float(F):.3f}"
-
-def _twoway_anova_full(df):
-    """
-    Returns dict with full ANOVA stats including df for F.
-    If HueGroup has <2 levels -> one-way (XGroup only).
-    """
-    d = df.dropna(subset=["value","XGroup"]).copy()
-    if d.empty or d["XGroup"].nunique() < 2:
-        return {"ok": False, "err": "Too few groups"}
-
-    n_h = d["HueGroup"].nunique(dropna=True) if "HueGroup" in d.columns else 0
-
-    try:
-        if n_h >= 2:
-            model = ols("value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)", data=d).fit()
-            an = sm.stats.anova_lm(model, typ=2)
-            df_den = int(model.df_resid)
-
-            return {
-                "ok": True,
-                "test": "Two-way ANOVA",
-
-                "F_x": float(an.loc["C(XGroup)", "F"]),
-                "df_x_num": int(an.loc["C(XGroup)", "df"]),
-                "df_x_den": df_den,
-                "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
-
-                "F_h": float(an.loc["C(HueGroup)", "F"]),
-                "df_h_num": int(an.loc["C(HueGroup)", "df"]),
-                "df_h_den": df_den,
-                "p_h": float(an.loc["C(HueGroup)", "PR(>F)"]),
-
-                "F_int": float(an.loc["C(XGroup):C(HueGroup)", "F"]),
-                "df_int_num": int(an.loc["C(XGroup):C(HueGroup)", "df"]),
-                "df_int_den": df_den,
-                "p_int": float(an.loc["C(XGroup):C(HueGroup)", "PR(>F)"]),
-            }
-
-        else:
-            model = ols("value ~ C(XGroup)", data=d).fit()
-            an = sm.stats.anova_lm(model, typ=2)
-
-            return {
-                "ok": True,
-                "test": "One-way ANOVA",
-                "F_x": float(an.loc["C(XGroup)", "F"]),
-                "df_x_num": int(an.loc["C(XGroup)", "df"]),
-                "df_x_den": int(model.df_resid),
-                "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
-            }
-
-    except Exception as e:
-        return {"ok": False, "err": str(e)}
-
-def _subjects_n_per_group(dfm):
-    # n per XGroup (counts non-NaN values)
-    n_per_x = dfm.groupby("XGroup")["value"].apply(lambda s: int(s.dropna().shape[0]))
-    groups = _order_x_groups(dfm["XGroup"].dropna().unique().tolist())
-    parts = [f"{g}: n={n_per_x.get(g, 0)}" for g in groups]
-    return " | ".join(parts)
-
-def _p_to_stars(p):
-    if not np.isfinite(p): return ""
-    if p < 1e-4: return "****"
-    if p < 1e-3: return "***"
-    if p < 1e-2: return "**"
-    if p < 5e-2: return "*"
-    return ""
-
-def _posthoc_ref_ttests(dfm, ref_group):
-    d = dfm.dropna(subset=["value","XGroup"]).copy()
-    ref = d[d["XGroup"] == ref_group]["value"].dropna().to_numpy()
-    if ref_group is None or ref_group not in d["XGroup"].unique():
-        return "n/a"
-
-    groups = [g for g in d["XGroup"].unique().tolist() if g != ref_group]
-    lines = []
-    for g in _order_x_groups(groups):
-        vals = d[d["XGroup"] == g]["value"].dropna().to_numpy()
-        if len(vals) < 2 or len(ref) < 2:
-            lines.append(f"{g} vs {ref_group}: not enough data")
-            continue
-        try:
-            p = _pg_get_pval(pg.ttest(vals, ref, paired=False))
-        except Exception:
-            p = np.nan
-        lines.append(f"{g} vs {ref_group}: p={_fmt_p_num(p)} {_p_to_stars(p)}")
-    return " | ".join(lines) if lines else "n/a"
-
-def _posthoc_pairs_anova(dfm, pair_list, x_label, hue_label):
-    if not pair_list:
-        return "n/a"
-    lines = []
-    for a, b in pair_list:
-        sub = dfm[dfm["XGroup"].isin([a, b])].dropna(subset=["value"])
-        if sub["XGroup"].nunique() < 2:
-            continue
-        res = _anova_subset(sub)  # uses your existing helper (p only)
-        if not res["ok"]:
-            lines.append(f"{a} vs {b}: {res['err'] or 'failed'}")
-            continue
-        if res["n_h"] >= 2:
-            lines.append(
-                f"{a} vs {b}: {x_label} p={_fmt_p_num(res['p_x'])} {_p_to_stars(res['p_x'])}, "
-                f"{hue_label} p={_fmt_p_num(res['p_h'])}, int p={_fmt_p_num(res['p_int'])}"
-            )
-        else:
-            lines.append(f"{a} vs {b}: p={_fmt_p_num(res['p_x'])} {_p_to_stars(res['p_x'])}")
-    return " | ".join(lines) if lines else "n/a"
-
-def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=None):
-    x_label_name   = _grouping_label("X")
-    hue_label_name = _grouping_label("Hue")
-
-    rows = []
-    for metric in metrics:
-        dfm = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))].copy()
-        dfm = dfm.dropna(subset=["value"])
-        if dfm.empty:
-            continue
-
-        stats = _twoway_anova_full(dfm)
-        subjects = _subjects_n_per_group(dfm)
-
-        if not stats.get("ok", False):
-            rows.append({
-                "Figure": metric,
-                "Test": "ANOVA failed",
-                "Subjects": subjects,
-                "F value interaction": "n/a",
-                "p value interaction": "n/a",
-                "Main effects": stats.get("err", "unknown error"),
-                "Post hoc test": "n/a",
-                "Post hoc results": "n/a",
-            })
-            continue
-
-        if stats["test"] == "Two-way ANOVA":
-            main_effects = (
-                f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
-                f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}; "
-                f"{hue_label_name}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}, "
-                f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
-            )
-            f_int = _fmt_F(stats["df_int_num"], stats["df_int_den"], stats["F_int"])
-            p_int = _fmt_p_num(stats["p_int"]) + (f" {_p_to_stars(stats['p_int'])}" if np.isfinite(stats["p_int"]) else "")
-        else:
-            main_effects = (
-                f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
-                f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
-            )
-            f_int, p_int = "n/a", "n/a"
-
-        if mode == "ref":
-            posthoc_test = "Unpaired t-tests vs reference"
-            posthoc_res  = _posthoc_ref_ttests(dfm, ref_group)
-        else:
-            posthoc_test = "Selected pairwise ANOVA"
-            posthoc_res  = _posthoc_pairs_anova(dfm, pair_list or [], x_label_name, hue_label_name)
-
-        rows.append({
-            "Figure": metric,
-            "Test": stats["test"],
-            "Subjects": subjects,
-            "F value interaction": f_int,
-            "p value interaction": p_int,
-            "Main effects": main_effects,
-            "Post hoc test": posthoc_test,
-            "Post hoc results": posthoc_res,
-        })
-
-    return pd.DataFrame(rows)
-
-
-
-
-
-
-
-
+#@@@@@@@@@@@@@@@@@@ Bandit Plot Groups @@@@@@@@@@@@@@@@@@#
 
 
 ### ------ Plotting Helper functions ------ ###
-def _selected_x_and_colors(x_checks,x_colors):
-    """
-    Called in _run_plots
-    """
-    sel = _selected_x(x_checks)
-    color_map = {}
-    for g in sel:
-        val = x_colors[g].value.strip()
-        color_map[g] = val if val else "tab:blue"
-    return sel, color_map
 
-def _selected_x(x_checks):
-    return _order_x_groups([g for g, cb in x_checks.items() if cb.value])
 
-def _order_x_groups(groups):
-    return sorted(groups, key=_hier_sort_key)
-
-def _choose_ref_group(order):
-    for g in order:
-        if _is_wt_group(g):
-            return g
-    return order[0] if order else None
-
-def _grouping_label(which="X"):
-    if which.lower().startswith("x"):
-        cols = globals().get("selected_group_cols_x", [])
-        default = "XGroup"
-    else:
-        cols = globals().get("selected_group_cols_hue", [])
-        default = "HueGroup"
-    cols = [str(c).strip() for c in (cols or []) if str(c).strip()]
-    return " | ".join(cols) if cols else default
-
-def _dot_palette(hues):
-    hues = list(hues)
-    if len(hues) == 0: return {}
-    if len(hues) == 1: return {hues[0]: "black"}
-    if len(hues) == 2: return {hues[0]: "white", hues[1]: "black"}
-    defaults = plt.rcParams.get('axes.prop_cycle', None)
-    colors = defaults.by_key()['color'] if defaults else ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
-    return {h: colors[i % len(colors)] for i, h in enumerate(hues)}
-
-def _order_hue_groups(hues):
-    hp = globals().get("HUE_PRIORITY", ["Female", "Male", "F", "M", "ALL", "UNASSIGNED"])
-    hp_lower = [p.lower() for p in hp]
-    def _prio(h):
-        u = str(h).strip()
-        try:
-            return (0, hp_lower.index(u.lower()), u.upper())
-        except ValueError:
-            return (1, u.upper())
-    return sorted([h for h in hues if h is not None], key=_prio)
-
-def _draw_bracket(ax, x1, x2, y, h, text):
-    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=1, c="black", zorder=5)
-    ax.text((x1+x2)/2, y+h, text, ha="center", va="bottom", fontsize=16, fontweight="bold")
 
 
 ### ------ PLOT METRICS ------ ###
-def _plot_metric_clean(df_metric, variable, x_color_map, *, mode="ref", 
-                       ref_group=None, pair_list=None, return_fig=False):
-    dfm = df_metric.copy()
-    order = _order_x_groups(dfm["XGroup"].dropna().unique().tolist())
-    if not order: return None
-    if (not ref_group) or (ref_group not in order):
-        ref_group = _choose_ref_group(order)
-
-    x_label_name   = _grouping_label("X")
-    hue_label_name = _grouping_label("Hue")
-
-    hue_levels = [h for h in dfm["HueGroup"].dropna().unique().tolist()]
-    pal_dots = _dot_palette(hue_levels)
-
-    width = max(5, 1 * len(order))
-    height = 4.0
-    fig, (ax_plot, ax_text) = plt.subplots(
-        1, 2, figsize=(width, height), gridspec_kw={'width_ratios': [3, 1]}
-    )
-
-    # Bars
-    #bar_palette = [x_color_map.get(g, "tab:blue") for g in order]
-    bar_palette = {g: x_color_map.get(g, "tab:blue") for g in order}
-    # replaced original barplot call
-    #sns.barplot(data=dfm, x="XGroup", y="value", order=order, 
-    #            ci=None, alpha=ALPHA, ax=ax_plot, 
-    #            palette=bar_palette)
-    sns.barplot(data=dfm, x="XGroup", y="value", order=order,
-                hue="XGroup", legend=False,
-                errorbar=None,
-                alpha=ALPHA, ax=ax_plot, palette=bar_palette)   
-
-    # Determine hue levels in a controlled order
-    raw_hues = dfm["HueGroup"].dropna().unique().tolist()
-    hue_levels = _order_hue_groups(raw_hues)
-
-    # Colors for dots — your helper already maps 2 hues as {hues[0]: "white", hues[1]: "black"}
-    pal_dots = _dot_palette(hue_levels)
-
-    # Points
-    sns.stripplot(
-        data=dfm, x="XGroup", y="value",
-        order=order,
-        hue="HueGroup",
-        hue_order=hue_levels,        # <-- enforce hue order
-        jitter=True, dodge=False, size=7,
-        edgecolor="black", linewidth=1,
-        palette=pal_dots,            # <-- colors aligned to hue_order
-        ax=ax_plot, zorder=3, alpha=ALPHA
-    )
-    if ax_plot.legend_ is not None:
-        ax_plot.legend_.remove()
-
-    # Legend (right panel) in the same hue order
-    if len(hue_levels) >= 2:
-        handles = [plt.Line2D([0],[0], marker='o', linestyle='None',
-                              markerfacecolor=pal_dots[h], markeredgecolor='black', label=str(h))
-                  for h in hue_levels]
-        ax_text.legend(handles=handles, title=hue_label_name, loc="upper left", bbox_to_anchor=(0, 0.6))
-
-    # Annotations
-    y_min, y_max = ax_plot.get_ylim()
-    span = (y_max - y_min) if y_max > y_min else 1.0
-    bump = 0.06 * span
-    data_max = dfm["value"].max() if dfm["value"].notna().any() else y_max
-
-    if mode == "ref" and (ref_group in order):
-        ref_vals = dfm[dfm["XGroup"] == ref_group]["value"].dropna().to_numpy()
-        for g in order:
-            if g == ref_group: continue
-            vals = dfm[dfm["XGroup"] == g]["value"].dropna().to_numpy()
-            if len(vals) >= 2 and len(ref_vals) >= 2:
-                try:
-                    p = _pg_get_pval(pg.ttest(vals, ref_vals, paired=False))
-                except Exception:
-                    p = np.nan
-                if np.isfinite(p) and p < 0.05:
-                    xloc = order.index(g)
-                    gmax = dfm[dfm["XGroup"] == g]["value"].max()
-                    y_star = (gmax if np.isfinite(gmax) else data_max) + bump
-                    ax_plot.text(xloc, y_star, _p_to_stars(p),
-                                 ha="center", va="bottom", fontsize=16, fontweight="bold")
-                    y_max = max(y_max, y_star + bump)
-        ax_plot.set_ylim(y_min, y_max)
-
-    elif mode == "pairs" and pair_list:
-        base = (dfm["value"].max() if dfm["value"].notna().any() else y_max) + bump
-        step = 0.12 * span
-        k = 0
-        for a,b in pair_list:
-            if (a not in order) or (b not in order):
-                continue
-            sub = dfm[dfm["XGroup"].isin([a,b])].dropna(subset=["value"])
-            if sub["XGroup"].nunique() < 2:
-                continue
-            res = _anova_subset(sub)
-            # draw bracket ONLY if XGroup effect significant
-            if res["ok"] and np.isfinite(res["p_x"]) and (res["p_x"] < 0.05):
-                x1 = order.index(a); x2 = order.index(b)
-                if x1 > x2: x1, x2 = x2, x1
-                y_here = base + k * step
-                _draw_bracket(ax_plot, x1, x2, y_here, 0.04 * span, _p_to_stars(res["p_x"]))
-                y_max = max(y_max, y_here + 0.08 * span)
-                k += 1
-        ax_plot.set_ylim(y_min, y_max)
-
-    ax_plot.set_title("")
-    ax_plot.set_xlabel("")
-    ax_plot.set_ylabel(variable)
-    plt.setp(ax_plot.get_xticklabels(), rotation=45, ha='right')
-    sns.despine(ax=ax_plot)
-
-    # Right panel: stats + Hue legend
-    ax_text.axis("off")
-    ax_text.text(
-        0, 1,
-        _stats_text(dfm, x_label_name, hue_label_name, mode=mode, ref_group=ref_group, pair_list=pair_list),
-        va="top", ha="left", fontsize=12, transform=ax_text.transAxes
-    )
-    if len(hue_levels) >= 2:
-        handles = [plt.Line2D([0],[0], marker='o', linestyle='None',
-                              markerfacecolor=pal_dots[h], markeredgecolor='black', label=str(h))
-                   for h in hue_levels]
-        ax_text.legend(handles=handles, title=hue_label_name, loc="upper left", bbox_to_anchor=(0, 0.6))
-
-    plt.tight_layout()
-
-    return fig if return_fig else plt.show()
 
 
-def _run_plots(long_df, x_checks, x_colors, ordered_x, root_path, mode = "ref", _=None):
-    """
-    Function that wraps around the _plot_metric_clean to loop through different metrics
-    Returns:
-        saved_paths; List
-            list of saved paths to the bandit metric plots
-    """
-    #clear_output()
-
-    status.step("Creating Metric Plots")
-    # intitate a empty list to capture the results
-    saved_paths  = []
-
-    # Create the directory that will be writen to
-    out_dir = Path(root_path, "metric_bar_plots")
-    out_dir.mkdir(parents=True, exist_ok=True)
 
 
-    sel_x, color_map = _selected_x_and_colors(x_checks, x_colors)
-    if len(sel_x) < 1:
-        print("Select at least one X group."); return
-
-    #mode = mode_radio.valuez
-    ref_dropdown = widgets.Dropdown(
-        options = ordered_x, value=_choose_ref_group(ordered_x),
-        description = "Reference:", layout=widgets.Layout(width="320px")
-    )   
-
-    if mode == "ref":
-        ref = ref_dropdown.value if (ref_dropdown.value in sel_x) else _choose_ref_group(sel_x)
-        status.ok(f"Showing X groups: {sel_x}  |  reference for stars: {ref}")
-    else:
-        pair_list = _current_pairs()
-        if not pair_list:
-            print(f"Showing X groups: {sel_x}  |  no pairs selected (select at least one)."); return
-        print(f"Showing X groups: {sel_x}  |  pairs: {pair_list}")
-
-    exclude = {"PeakAccuracy_Day","PeakAccuracy_Night",
-                "Win-stay_Day","Win-stay_Night",
-                "Lose-shift_Day","Lose-shift_Night"}
-    metrics = [m for m in long_df["variable"].dropna().unique() if m not in exclude]
-
-    for metric in metrics:
-        subset = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))]
-        if subset["value"].dropna().empty:
-            status.warn(f"Skipping {metric} — no data for selected X groups."); continue
-        if mode == "ref":
-            fig = _plot_metric_clean(
-                subset, metric,
-                x_color_map={g: color_map[g] for g in sel_x if g in subset['XGroup'].unique()},
-                mode="ref", ref_group=ref,
-                return_fig=True
-            )
-        else:
-            fig = _plot_metric_clean(
-                subset, metric,
-                x_color_map={g: color_map[g] for g in sel_x if g in subset['XGroup'].unique()},
-                mode="pairs", pair_list=_current_pairs(),
-                return_fig=True
-            )
-
-        if fig is None:
-            status.warn(f"Skipping {metric} — no figure produced.")
-            continue
-
-        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", metric).strip("_")
-        out_path = out_dir / f"{safe_name}.png"
-
-        # Save at print-friendly resolution; bbox_inches="tight" trims the
-        # generous whitespace left by the 2-panel layout + rotated x-labels.
-        fig.savefig(out_path, dpi=300, bbox_inches="tight")
-
-        plt.close(fig)
-
-        saved_paths.append(out_path)
-        status.ok(f"Saved {metric} -> {out_path}")
-    
-    return saved_paths 
 
 
 #@@@@@@@@@@@@@@@@@@ Peak Accuracy @@@@@@@@@@@@@@@@@@#
@@ -1922,7 +735,7 @@ def plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path):
 
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def _plot_metric_display(dfm, variable, ax, x_color_map, *,
                          group_order=None, hue_order=None, ylabel=None,
                          xlabel=None,
@@ -1971,8 +784,8 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
 
     # Hue (Sex) order + dot colors, matching _plot_metric_clean's convention
     # (helper maps 2 hues as {hues[0]: "white", hues[1]: "black"}).
-    hue_levels = hue_order or _order_hue_groups(dfm["HueGroup"].dropna().unique().tolist())
-    pal_dots = _dot_palette(hue_levels)
+    hue_levels = hue_order or core._order_hue_groups(dfm["HueGroup"].dropna().unique().tolist())
+    pal_dots = core._dot_palette(hue_levels)
 
     # --- Bars: mean per XGroup, no seaborn error bars, alpha shared with dots ---
     bar_palette = {g: x_color_map.get(g, "tab:blue") for g in order}
@@ -2000,10 +813,10 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
     # --- Single genotype p-value from the two-way ANOVA (matches L4 caption) ---
     # We report the XGroup (genotype) main effect p_x, NOT per-group t-tests
     # this reads e.g. "p = 0.002" / "p < 0.001"
-    res = _twoway_anova_full(dfm)
+    res = core._twoway_anova_full(dfm)
     if res.get("ok") and np.isfinite(res.get("p_x", np.nan)):
         ax.text(
-            0.5, 1.05, _fmt_p(res["p_x"]),
+            0.5, 1.05, core._fmt_p(res["p_x"]),
             transform=ax.transAxes, ha="center", va="top",
             fontsize=pval_fontsize, fontstyle="italic",
         )
@@ -2033,7 +846,7 @@ def _plot_metric_display(dfm, variable, ax, x_color_map, *,
     return handles
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def _rev_learning_core(rev_df, ax, palette_map, group_order):
     """
     Draw the reverse-learning line plot (accuracy around the switch) onto a
@@ -2068,7 +881,7 @@ def _rev_learning_core(rev_df, ax, palette_map, group_order):
     sns.despine(ax=ax)
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def find_contrast_pair(df, pellet_tol=15, min_sessions=1, wt_label="WT", het_label="Het"):
     """
     Find one WT mouse and one Het mouse with SIMILAR total pellets but a LARGE gap
@@ -2138,7 +951,7 @@ def find_contrast_pair(df, pellet_tol=15, min_sessions=1, wt_label="WT", het_lab
 
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def _plot_pleft_core(df, ax, *, line_color="dodgerblue", behaviour_label=None,
                      show_xlabel=True):
     """
@@ -2161,8 +974,10 @@ def _plot_pleft_core(df, ax, *, line_color="dodgerblue", behaviour_label=None,
         show_xlabel : bool
             Whether to draw the "Trial" x-label (off for the top of a stack).
     """
+
     # True underlying reward probability for the left port (the step function).
     true_left = fed3bandit_extracted.true_probs(df, offset=5)[0]
+
     # Mouse's actual choice behaviour, smoothed over a sliding window.
     mouse_left = fed3bandit_extracted.binned_paction(df, window=10)
 
@@ -2170,11 +985,15 @@ def _plot_pleft_core(df, ax, *, line_color="dodgerblue", behaviour_label=None,
     ax.plot(np.arange(len(true_left)), true_left, color="black", linewidth=2, alpha=0.5)
     ax.plot(np.arange(len(mouse_left)), mouse_left, color=line_color, linewidth=3, alpha=0.7)
 
+  
     ax.set_ylabel("P(Left)")
     ax.set_yticks([0, 0.5, 1])
-    ax.set_xlabel("Trial" if show_xlabel else "")
-    
+    #ax.set_yticks([0, 1])
+    #ax.set_yticklabels(["Left", "Right"])
 
+    # add side axis
+    ax.text(-0.01, 1, "Right",  transform=ax.transAxes, va="top", ha="right")
+    ax.text(-0.01, 0.12, "Left",  transform=ax.transAxes, va="top", ha="right")
 
     if behaviour_label:
         # Label sits just outside the right edge, colored to match the trace.
@@ -2314,7 +1133,7 @@ def _plot_file_core_display(fed_list, metadata_df, root_path, dpi=150,
 
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def _fed_for_mouse(fed_list, metadata_df, mouse_id):
     """
     Return the FIRST FED session DataFrame whose filename maps (via metadata_df)
@@ -2351,7 +1170,7 @@ def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
 
 
 
-#!!!!! WRITTEN WITH HELP VIA CLAUDE Opus 4.8 - Medium !!!!!
+
 def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
                 fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300):
     """
@@ -2489,7 +1308,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
     color_map = {g: _color_for(g) for g in group_order}
     # One controlled Sex order shared by every bar panel so dot colors line up.
-    hue_order = _order_hue_groups(long_df["HueGroup"].dropna().unique().tolist())
+    hue_order = core._order_hue_groups(long_df["HueGroup"].dropna().unique().tolist())
 
 
 
@@ -2554,9 +1373,13 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         (het_id, f"{genename} behaviour", het_color,       True),
     ]
 
+
+
+
     for row, (mid, label, col, show_x) in enumerate(trace_specs):
         ax_tr = fig.add_subplot(gs_a[row, 1])
         fed = _fed_for_mouse(fed_list, metadata_df, mid)
+        
         if fed is None:
             # Missing session shouldn't kill the whole composite.
             status.warn(f"L4: no FED session found for Mouse_ID {mid}; blank trace.")
@@ -2564,6 +1387,25 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
             continue
         _plot_pleft_core(fed, ax_tr, line_color=col,
                          behaviour_label=label, show_xlabel=show_x)
+        
+        # turn off all axis
+        ax_tr.axis("off")
+        
+        if row == 1:
+            # add reward side text
+            ax_tr.text(1.01, 1.05, "Rewarded Side", transform=ax_tr.transAxes,
+                       ha="left", va="bottom", color="0.5", fontsize = 12)
+
+            # Add arrow for both plots
+            ax_tr.annotate("",
+                    xy=(1.0, -0.2), xytext=(0.15, -0.2),
+                    xycoords="axes fraction",
+                    annotation_clip=False,  # don't clip content drawn above the axes
+                    arrowprops=dict(arrowstyle="->", lw=5, color="0.6"))
+
+            # Label for arrow independently
+            ax_tr.text(0.07, -0.28, "3 days", transform=ax_tr.transAxes,
+                       ha="left", va="bottom", color="0.5")
 
 
 
@@ -2645,9 +1487,9 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
     fig.subplots_adjust(bottom=0.22)
 
-    out_path = out_dir / f"{genename}_L4.png"
+    out_path = out_dir / f"{genename}_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format = "svg")
     plt.close(fig)
 
     status.ok(f"L4 composite saved -> {out_path}")
@@ -2667,12 +1509,14 @@ class BanditResult:
     a dozen values — attributes are self-documenting and order-independent."""
     fed_list: list
     metadata_df: object
-    bm_md: object          # metrics + metadata (the table most re-analysis needs)
-    bm_long: object        # melted, plot-ready
+    bm_md: object          # essentailly the L3, bandit metrics and metadata
+    bm_long: object        # melted version og bm_md
     rev_df: object
     l3_path: Path
     barplot_paths: list
     l4_path: Path
+
+
 
 
 def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None, dpi=300):
@@ -2703,22 +1547,23 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
     # --- Individual plots + metrics -> L3 ---
     metadata_df = clean_key_filename_column(key_df2)
     _plot_file_core(fed_list, metadata_df, root_path)
-    md = build_bandit_metakey(metadata_df)
-    id_col, other_id = pick_match_method(md)
+    meta_cols, md = core.build_metakey(metadata_df, assay = "bandit")
+    id_col, other_id = core.pick_match_method(md)
     bm = compute_bandit_metrics(fed_list, md, id_col)
-    bm_md = attach_meta_bm(bm, md, id_col)
-    l3_path = output_l3(bm_md, id_col, other_id, root_path)
+    bm_md = core.attach_meta(bm, md, id_col)
+    l3_path = core.output_l3(bm_md, id_col, other_id, meta_cols, root_path, assay="bandit")
+
 
     # --- Barplots ---
-    mapped_df = build_group_selections(md)
-    bm_plot = merge_group_selections(bm_md, mapped_df)
-    bm_long = melt_bandit(bm_plot)
+    mapped_df = core.build_group_selections(md)
+    bm_plot = core.merge_group_selections(bm_md, mapped_df)
+    bm_long = core.melt_metric(bm_plot, assay="bandit")
 
     # Honor a caller-supplied palette; otherwise use the aesthetics defaults.
-    x_checks, x_colors, ordered_x = define_aesthetics(bm_long)
+    x_checks, x_colors, ordered_x = core.define_aesthetics(bm_long)
     if colors is not None:
         x_colors = colors
-    barplot_paths = _run_plots(bm_long, x_checks, x_colors, ordered_x, root_path)
+    barplot_paths = core._run_plots(bm_long, x_checks, x_colors, ordered_x, root_path)
 
     # --- Peak accuracy + L4 composite (cells 8-9) ---
     basenames, xgroups = prep_pa_groups(mapped_df)
