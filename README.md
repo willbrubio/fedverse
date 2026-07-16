@@ -41,5 +41,3 @@ sublibrary contains utility functions to help deliver structured messages throug
 ## AI Attribution
 Code was written with Assistance using generative AI. 
 ver: Claude Opus 4.8
-
-~
