@@ -4,9 +4,11 @@ William B. Rubio
 """
 
 # import dependancies
+from dataclasses import dataclass
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import seaborn as sns
 from pathlib import Path
 import tqdm
@@ -16,7 +18,7 @@ from scipy.stats import sem
 from itertools import cycle
 
 # Import cousins
-from fedlib.fedutils.fedlog import status 
+from fedlib.fedutils.fedlog import status
 from fedlib.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
 from fedlib import fedassets
 from fedlib.fedcore import core
@@ -621,64 +623,343 @@ def plot_group_mean_demand_with_params(mapping_df, pm_grps_df, md, x_colors,
 
 
 
+
 #@@@@@@@@@@@@@@@@@@ PR L4 @@@@@@@@@@@@@@@@@@#
 
 
+### ------ L4 drawing cores ------- ###
+
+def _plot_pr_trace_core(df, ax, *, cmap="spring", show_xlabel=True, night_shade=True):
+    """
+    Draw ONE mouse's PR "pellet histogram" onto a caller-supplied Axes: each earned
+    pellet as a dot whose height is how many pellets deep into the current block it
+    was (Block_Pellet_Count), so the rising sawtooth shows effort ramping across the
+    progressive ratio before each reset. Colored by block depth and (optionally)
+    night-shaded. Creates no figure and saves nothing -- the caller owns the Axes.
+
+    This is the composable core behind pr1_indv_plots, reused by assemble_pr_l4 so
+    the L4 example trace and the standalone per-mouse plots stay identical.
+
+    Arguments:
+        df : DataFrame
+            A single FED session (must carry Event / Block_Pellet_Count).
+        ax : matplotlib Axes
+            Target axes to draw into.
+        cmap : str
+            Palette for the block-depth hue.
+        show_xlabel : bool
+            Whether to keep an x-axis label (off inside a tight composite).
+        night_shade : bool
+            Shade 18:00->06:00 grey when the x-axis is real datetime.
+    """
+    pellet_df = df[df["Event"] == "Pellet"].copy()
+    if pellet_df.empty:
+        status.warn("L4: example mouse has no pellet events; blank trace.")
+        ax.axis("off")
+        return
+
+    # --- Resolve an x-axis: prefer a real datetime so we can night-shade ---
+    x_is_dt = isinstance(pellet_df.index, pd.DatetimeIndex)
+    if x_is_dt:
+        x_series = pd.Series(pellet_df.index, index=pellet_df.index)
+    else:
+        x_series = None
+        for col in ["Timestamp", "Time", "DateTime", "Datetime", "datetime"]:
+            if col in pellet_df.columns:
+                ts = pd.to_datetime(pellet_df[col], errors="coerce")
+                if ts.notna().any():
+                    x_series = ts
+                    x_is_dt = True
+                    break
+        if x_series is None:
+            # Fall back to a plain running index (no shading possible).
+            x_series = pd.Series(np.arange(len(pellet_df)), index=pellet_df.index)
+
+    hue_vals = pellet_df["Block_Pellet_Count"].clip(upper=40)
+    sns.scatterplot(
+        x=x_series, y=pellet_df["Block_Pellet_Count"],
+        hue=hue_vals, palette=cmap, s=16, alpha=0.7,
+        edgecolor="none", legend=False, ax=ax,
+    )
+
+    if x_is_dt:
+        import datetime as dt
+        night_start, night_end = dt.time(18, 0), dt.time(6, 0)
+
+        start_date = pd.to_datetime(x_series).min().normalize()
+        end_date   = pd.to_datetime(x_series).max().normalize()
+
+        # --- Night shading: each night spans that day's 18:00 -> the next day's
+        # 06:00. Stop one day short of the last day (end_date - 1) so no empty
+        # trailing night is painted past the end of the data (matches pr1_indv_plots).
+        if night_shade:
+            for day in pd.date_range(start_date, end_date - pd.Timedelta(days=1)):
+                start = pd.Timestamp.combine(day, night_start)
+                end   = pd.Timestamp.combine(day + pd.Timedelta(days=1), night_end)
+                ax.axvspan(start, end, color="gray", alpha=0.18, zorder=0)
+
+        # --- X-axis "Day N" labels. For every day that has a following dark cycle,
+        # center the label on the light->dark transition (18:00). The final day has
+        # no dark cycle drawn (the shading loop stops one day early), so fall back to
+        # centering on its light segment (noon). Same fallback if shading is off.
+        days = pd.date_range(start_date, end_date)
+        tick_locs = []
+        for i, day in enumerate(days):
+            has_dark = night_shade and (i < len(days) - 1)
+            if has_dark:
+                tick_locs.append(pd.Timestamp.combine(day, night_start))   # dark-cycle transition
+            else:
+                tick_locs.append(day + pd.Timedelta(hours=12))             # light-segment center
+        ax.set_xticks(tick_locs)
+        ax.set_xticklabels([f"Day {i + 1}" for i in range(len(days))])
+        ax.tick_params(axis="x", length=0)     # keep the day labels, drop tick marks
+        ax.set_xlabel("")
+    else:
+        ax.set_xlabel("Index" if show_xlabel else "")
+
+    ax.set_ylabel("Pellets earned", fontsize=13)
+    ax.set_title("")
+    sns.despine(ax=ax)
 
 
+def _predict_demand_Q(P, alpha, beta):
+    """Exponentiated-demand consumption: Q = 100 / (1 + (P/alpha)**beta)."""
+    P = np.asarray(P, dtype=float)
+    return 100.0 / (1.0 + (P / alpha) ** beta)
+
+
+def _demand_curve_core(long_df, ax, color_map, group_order, *,
+                       alpha_var="Demand_alpha_FR", beta_var="Demand_beta_FR",
+                       P_min=1.0, P_max=100.0, n_grid=120, annotate=True,
+                       annotate_top_right=False):
+    """
+    Draw the grouped mean demand curve onto a caller-supplied Axes, rebuilt straight
+    from the melted metric frame. For every mouse we already carry a fitted alpha and
+    beta (as two `variable` rows), so we pivot those back to one row per mouse, predict
+    Q over a shared log price grid, and plot the per-group mean +- SEM. A dashed marker
+    and an "alpha / slope" annotation sit at each group's mean alpha, matching
+    plot_group_mean_demand_with_params without needing the mapping/grouped frames.
+
+    Assumes long_df["XGroup"] is ALREADY relabeled to the final display labels and that
+    color_map / group_order are keyed by those labels.
+
+    Arguments:
+        annotate : bool
+            Master toggle for drawing the alpha/slope labels at all.
+        annotate_top_right : bool
+            True (default) -> stack every group's alpha/slope label in the top-right
+            corner, one per group, so labels never overlap the curves or each other.
+            False -> place each group's label in a fixed corner ranked by mean alpha:
+            lowest alpha top-left, 2nd-lowest bottom-left, 3rd top-right, highest
+            bottom-right. Only as many corners as there are groups are used, so 2 and
+            3 groups work too.
+    """
+    dsub = long_df[long_df["variable"].isin([alpha_var, beta_var])]
+    if dsub.empty:
+        status.warn("L4: no demand parameters in long_df; panel C left blank.")
+        ax.axis("off")
+        return
+
+    wide = dsub.pivot_table(
+        index=["Mouse_ID", "XGroup"], columns="variable",
+        values="value", aggfunc="first",
+    ).reset_index()
+
+    if alpha_var not in wide.columns or beta_var not in wide.columns:
+        status.warn("L4: demand alpha/beta missing after pivot; panel C left blank.")
+        ax.axis("off")
+        return
+
+    price_grid = np.unique(np.logspace(np.log10(max(P_min, 1.0)), np.log10(P_max), n_grid))
+
+    # Collect each drawn group's label (with its mean alpha) and place them all after
+    # the loop, so the ranked-corner layout can see every group's alpha at once.
+    annot_records = []                     # list of (a_mean, x_a, y_a, color, label)
+    for g in group_order:
+        rows = wide.loc[wide["XGroup"] == g]
+        # Keep only physically meaningful fits (positive alpha and beta).
+        pairs = [
+            (float(a), float(b))
+            for a, b in zip(rows[alpha_var], rows[beta_var])
+            if pd.notna(a) and pd.notna(b) and float(a) > 0 and float(b) > 0
+        ]
+        if not pairs:
+            status.warn(f"L4: group '{g}' has no valid demand fits; skipped in panel C.")
+            continue
+
+        Qs = np.vstack([_predict_demand_Q(price_grid, a, b) for a, b in pairs])
+        mean_Q = np.nanmean(Qs, axis=0)
+        sem_Q = sem(Qs, axis=0, nan_policy="omit")
+
+        color = color_map.get(g, "tab:blue")
+        ax.plot(price_grid, mean_Q, color=color, lw=2.5, label=g)
+        ax.fill_between(price_grid, mean_Q - sem_Q, mean_Q + sem_Q,
+                        color=color, alpha=0.2, linewidth=0)
+
+        # Dashed drop-line + annotation at the group's mean alpha.
+        a_mean = float(np.mean([a for a, _ in pairs]))
+        b_mean = float(np.mean([b for _, b in pairs]))
+        ix = int(np.argmin(np.abs(price_grid - a_mean)))
+        x_a, y_a = price_grid[ix], mean_Q[ix]
+        ax.vlines(x_a, 0, y_a, linestyle="--", linewidth=1.4, color=color, alpha=0.85)
+        ax.plot(x_a, y_a, "o", color=color, markersize=5)
+
+        if annotate:
+            label = f"α = {a_mean:.2f}\nslope = {b_mean:.2f}"
+            annot_records.append((a_mean, x_a, y_a, color, label))
+
+    # --- Place the alpha/slope labels ---
+    if annotate and annot_records:
+        if annotate_top_right:
+            # Stack every group's label in the top-right corner (axes coords), one
+            # block per group in draw order, colored to match its curve.
+            for slot, (_a, _x, _y, color, label) in enumerate(annot_records):
+                ax.text(0.83, 0.95 - slot * 0.16, label,
+                        transform=ax.transAxes, color=color, fontsize=9,
+                        ha="left", va="top")
+        else:
+            # Rank by mean alpha (ascending) and drop each label into a fixed corner:
+            # lowest -> top-left, 2nd -> bottom-left, 3rd -> top-right, 4th -> bottom-
+            # right. zip stops at the number of groups, so 2 and 3 groups just fill the
+            # first 2 / 3 corners.
+            corners = [
+                (0.20, 0.55, "left",  "top"),      # lowest alpha  -> top-left
+                (0.25, 0.30, "left",  "bottom"),   # 2nd lowest    -> bottom-left
+                (0.80, 0.65, "right", "top"),      # 3rd (next)    -> top-right
+                (0.90, 0.40, "right", "bottom"),   # highest       -> bottom-right
+            ]
+            ranked = sorted(annot_records, key=lambda r: r[0])   # ascending mean alpha
+            for (cx, cy, cha, cva), (_a, _x, _y, color, label) in zip(corners, ranked):
+                ax.text(cx, cy, label, transform=ax.transAxes, color=color,
+                        fontsize=9, ha=cha, va=cva)
+
+    # --- Axes cosmetics: log price axis, Hursh-style ticks (matches the demand fig) ---
+    ax.set_xscale("log")
+    ax.set_xlabel("Food Price (FR)", fontsize=13)
+    ax.set_ylabel("Consumption", fontsize=13)
+    ax.set_ylim(0, 105)
+    ax.set_yticks(np.arange(0, 101, 20))
+    ax.set_xlim(1, 100)
+    ticks = np.array([1, 2, 3, 5, 10, 15, 20, 30, 40, 50, 75, 100], float)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(int(t)) for t in ticks], fontsize=8)
+    ax.legend(title="", frameon=False, loc="lower left", fontsize=9)
+    sns.despine(ax=ax)
+
+
+def _pick_example_fed(long_df, fed_list, metadata_df, *, target_group=None,
+                      min_blocks=10):
+    """
+    Choose one representative mouse for the panel-B example trace
+    among mice in the requested genotype group that ran at least `min_blocks` blocks.
+     
+    Take the one with the highest MedianBreakPoint (the fullest, most visually rich sawtooth) whose FED
+    session we can actually resolve.
+
+    The group / block constraints are applied strictly first, then relaxed in steps
+    (drop the block floor, then drop the group) so we always return SOME usable mouse
+    rather than a blank panel.
+
+    Arguments:
+        target_group : str | None
+            Final display label the example must belong to (e.g. the het label). None
+            means "any group". Must match long_df["XGroup"] AFTER relabeling.
+        min_blocks : int
+            Minimum Numberofblocks required for the preferred candidates.
+
+    Returns (fed_df | None, mouse_id | None).
+    """
+    # --- Pivot the two per-mouse metrics we filter/sort on back to wide ---
+    sub = long_df[long_df["variable"].isin(["Numberofblocks", "MedianBreakPoint"])]
+    wide = sub.pivot_table(
+        index=["Mouse_ID", "XGroup"], columns="variable",
+        values="value", aggfunc="first",
+    ).reset_index()
+
+    # Rank by break point (fullest sawtooth first); guard if the column is absent.
+    sort_col = "MedianBreakPoint" if "MedianBreakPoint" in wide.columns else None
+
+    def _ranked_ids(df):
+        df = df.dropna(subset=[sort_col]) if sort_col else df
+        if sort_col:
+            df = df.sort_values(sort_col, ascending=False)
+        return df["Mouse_ID"].astype(str).tolist()
+
+    # Build progressively looser candidate pools, most-constrained first.
+    in_group = wide if target_group is None else wide[wide["XGroup"] == target_group]
+    if "Numberofblocks" in in_group.columns:
+        enough_blocks = in_group[in_group["Numberofblocks"] >= min_blocks]
+    else:
+        enough_blocks = in_group
+
+    for pool in (enough_blocks, in_group, wide):     # group+blocks -> group -> anything
+        for mid in _ranked_ids(pool):
+            fed = core._fed_for_mouse(fed_list, metadata_df, mid)
+            if fed is not None and "Event" in fed.columns and (fed["Event"] == "Pellet").any():
+                return fed, mid
+
+    # Last resort: first session with pellet rows, whatever its Mouse_ID.
+    for fed in fed_list:
+        if "Event" in fed.columns and (fed["Event"] == "Pellet").any():
+            return fed, str(os.path.basename(str(getattr(fed, "name", "example"))))
+    return None, None
+
+
+### ------ L4 assembly ------- ###
 
 def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
-                fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300):
+                   fed_list, metadata_df, *, bandittype=None, schematic_path=None, dpi=300):
     """
-    Assemble the composite "L4" deliverable figure for one knockout model:
+    Assemble the composite "L4" deliverable figure for one knockout model on the
+    Progressive Ratio (PR1) task, mirroring the published FMR1 PR figure:
 
-        A) device schematic (optional) + two example P(Left) traces
-           (a WT and a gene mouse chosen for similar reward / different accuracy)
-        B) reverse-learning line plot  +  Peak Accuracy bar
-        C) Total pokes bar
-        D) Win-stay bar
-        E) Lose-shift bar
+        A) FED3 + PR task schematic (device image) with the gene name as the title
+        B) one example mouse's pellet histogram (earned pellet vs. effort/block depth,
+           night-shaded)
+        C) grouped mean demand curve with per-group alpha / slope annotations
+        D) Daily pellets bar
+        E) Total pokes bar
+        F) Median break point bar
+        G) Demand alpha bar
+        H) Demand slope (beta) bar
 
     plus a single shared Sex (Female/Male) legend and a caption. Every bar panel
     reports the genotype main effect from a two-way ANOVA, matching the caption.
 
-    Orchestration only: the drawing lives in _plot_pleft_core, _rev_learning_core
+    Orchestration only: the drawing lives in _plot_pr_trace_core, _demand_curve_core
     and _plot_metric_display so the layout logic here stays readable.
 
     Arguments:
         long_df : DataFrame
-            Melted metrics (columns: variable / XGroup / HueGroup / value).
-        rev_df : DataFrame
-            Per-trial peak accuracy around the switch (Timepoint / Value /
-            Display_Group).
+            Melted PR metrics (columns: variable / XGroup / HueGroup / value /
+            Mouse_ID). Supplies BOTH the bar panels and -- via the per-mouse
+            Demand_alpha_FR / Demand_beta_FR rows -- the grouped demand curve.
         x_colors : dict
             Group -> ipywidgets color widget (plain strings also tolerated).
         ordered_x : list
             X-group order hint from the aesthetics step (WT is forced first).
         bm_md : DataFrame
-            Per-session metadata; supplies the gene name AND feeds
-            find_contrast_pair to choose the two example mice.
+            Per-session metadata; supplies the gene name (bm_md["Gene"][0]).
         root_path : str | Path
             Output root; the figure is written under <root_path>/L4.
         fed_list : list
-            FED session DataFrames, used to draw the two example traces directly.
+            FED session DataFrames, used to draw the example trace directly.
         metadata_df : DataFrame
-            Stitched metadata, used to map Mouse_ID -> FED session for the traces.
-        bandittype; String | None
-            accepts "bandit100" & "bandit80" in order to properly create the schematics.
+            Stitched metadata, used to map Mouse_ID -> FED session for the trace.
+        bandittype : str | None
+            Accepted for call-site compatibility with the bandit L4; ignored here
+            (PR1 always uses the pr1 schematic).
         schematic_path : str | Path | None
-            Optional device/behaviour image for the top-left of panel A. If None,
-            that corner is left blank for manual assembly.
+            Override for the panel-A image. Defaults to the packaged pr1 schematic.
         dpi : int
             Save resolution.
 
     Returns:
         out_path : Path
-            Path to the saved composite PNG.
+            Path to the saved composite SVG.
     """
 
-
-    status.step("Assembling L4 composite figure")
+    status.step("Assembling PR1 L4 composite figure")
 
     out_dir = Path(root_path, "L4")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -686,44 +967,24 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     # Gene name that replaces the generic "HET" label throughout the figure.
     genename = bm_md["Gene"][0]
 
-    # --- Pick the two example mice: similar reward, different performance ---
-    best, ranked = find_contrast_pair(bm_md, pellet_tol=15)
-    wt_id = str(best["Mouse_ID_WT"])
-    het_id = str(best["Mouse_ID_HET"])
-    status.ok(f"L4 example pair -> WT: {wt_id} | {genename}: {het_id} "
-              f"(acc gap {best['acc_gap']:.3f}, pellet gap {best['pellet_gap']:.1f})")
-
-
-    # --- Resolve colors to a plain {group: color} dict ONCE ---
-    # x_colors may hold ipywidgets (with .value) or plain strings; tolerate both.
-    def _resolve(g):
-        c = x_colors.get(g, None)
-        val = getattr(c, "value", c)                 
-        val = val.strip() if isinstance(val, str) else ""
-        return val or "tab:blue"
-    color_map = {g: _resolve(g) for g in x_colors}
-
-
     long_df = long_df.copy()
-    rev_df = rev_df.copy()
 
-    # Preferred left-to-right order of zygosities after WT, and their pretty form.
+    # --- Relabel zygosities to display form (identical convention to bandit L4) ---
+    # Single mutant   -> bare gene name on the bar.
+    # Multiple mutants -> zygosity on the bar, gene name on the x-axis.
     zygotic_order = ["HET", "HOM", "HEMI"]
     zyg_display   = {"HET": "Het", "HOM": "Hom", "HEMI": "Hemi"}
 
     present = long_df["XGroup"].dropna().unique().tolist()
     non_wt  = [g for g in present if str(g).upper() != "WT"]
-    multi   = len(non_wt) > 1                      # drives the labeling convention
+    multi   = len(non_wt) > 1
 
     if not multi:
-        # Single mutant -> bare gene name shown on the bar itself.
         relabel = {g: genename for g in non_wt}
     else:
-        # Multiple mutants -> zygosity on the bar; gene name goes on the x-axis.
         relabel = {g: zyg_display.get(str(g).upper(), str(g).title()) for g in non_wt}
 
     long_df["XGroup"] = long_df["XGroup"].replace(relabel)
-    rev_df["Display_Group"] = rev_df["Display_Group"].replace(relabel)
 
     # --- Order: WT first, then mutants by zygotic_order (unknowns sort last) ---
     def _zygo_rank(orig_label):
@@ -734,8 +995,8 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     group_order = ["WT"] + [relabel[g] for g in non_wt_sorted]
 
     # --- Resolve colors keyed to the FINAL display labels ---
-    # x_colors keys are inconsistent upstream (raw "HOM"/"HEMI" but bare "FMR1"
-    # for het), so for each final label we try several candidate source keys,
+    # x_colors keys are inconsistent upstream (raw "HOM"/"HEMI" but bare gene for
+    # het), so for each final label we try several candidate source keys,
     # case-insensitively, before falling back.
     def _resolve_widget(entry):
         val = getattr(entry, "value", entry)          # widget -> .value, else itself
@@ -748,14 +1009,11 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
         if c:
             xc_norm[str(k).upper()] = c
 
-    # Recover each final label's ORIGINAL raw zygosity so we can try it as a key.
     final_to_orig = {new: old for old, new in relabel.items()}
     final_to_orig["WT"] = "WT"
 
     def _color_for(final_label):
         orig = final_to_orig.get(final_label, final_label)
-        # try: raw zygosity ("HOM"), the bare gene ("FMR1", covers het), then the
-        # display label itself, then a visible default.
         for cand in (orig, genename, final_label):
             hit = xc_norm.get(str(cand).upper())
             if hit:
@@ -766,187 +1024,215 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     # One controlled Sex order shared by every bar panel so dot colors line up.
     hue_order = core._order_hue_groups(long_df["HueGroup"].dropna().unique().tolist())
 
-
-
     # ---------------- Figure + grid layout ----------------
-    # Row 0: panel A. 
-    # Row 1: line plot (wide) + four equal-width bar plots.
-    fig = plt.figure(figsize=(16, 8))
-    gs = fig.add_gridspec(
-        nrows=2, ncols=5,
-        height_ratios=[1.0, 1.4],
-        width_ratios=[3, 1, 1, 1, 1],
-        hspace=0.35, wspace=0.45,
-    )
+    # Row 0: A (schematic) | B (example histogram) | C (demand curve, widest).
+    # Row 1: five equal-width bar panels D-H.
+    fig = plt.figure(figsize=(16, 9))
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
 
+    gs_top = gs[0].subgridspec(1, 3, width_ratios=[0.9, 1.3, 1.8], wspace=0.35)
+    gs_bot = gs[1].subgridspec(1, 5, wspace=0.55)
 
-    ##### Panel A  #####
-    # schematic (left) + two stacked example traces (right)
-    # Nested grid so the top row can hold both the image and the two traces.
-    gs_a = gs[0, :].subgridspec(
-        2, 3, 
-        width_ratios=[1, 2, 0.3], 
-        hspace=0.25, wspace=0.08)
+    ##### Panel A: schematic #####
+    if schematic_path is None:
+        schematic_path = fedassets.get("pr1_schematic.jpg")
 
-    # Schematic spans both sub-rows on the left; blank if no image supplied.
-    # find what bandit version
-    bt = str(bandittype).strip().lower()
-    bandit80_dict = {"bandit80", "80"}
-    bandit100_dict = {"bandit100", "100"}
-    
-    if bt in bandit80_dict:
-        schematic_path=fedassets.get("bandit80_schematic.jpg")
-    elif bt in bandit100_dict:
-        schematic_path=fedassets.get("bandit100_schematic.jpg")
-    else:
-        # fail loudly
-        raise ValueError(
-            f"Unrecognized bandittype {bandittype!r}; "
-            f"expected one of {sorted(bandit80_dict | bandit100_dict)}."
-        )
-
-    # add the bandit schematic
-    ax_schem = fig.add_subplot(gs_a[:, 0])
+    ax_schem = fig.add_subplot(gs_top[0, 0])
     ax_schem.axis("off")
-    _panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
-
+    core._panel_label(ax_schem, "A)", dx=0.05, dy=0.75)
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
-    # add genename label at title
+    else:
+        status.warn(f"L4: schematic image not found ({schematic_path}); panel A blank.")
     ax_schem.set_title(genename, loc="left", fontsize=20, fontweight="bold")
 
-
-    ### Switching plots ###
-    # Two example traces, drawn directly onto their axes (no PNG round-trip).
-    # (Mouse_ID, right-margin label, genotype color, show x-label on bottom only)
+    ##### Panel B: example mouse pellet histogram #####
+    # Force the example to be a het mouse: recover HET's final display label (the
+    # bare gene name when it's the only mutant, else "Het") to match the relabeled
+    # long_df["XGroup"]. None if there's no het group, in which case any mouse is ok.
     het_raw = next((g for g in non_wt if str(g).upper() == "HET"), None)
-    het_display = relabel.get(het_raw, genename)
-    het_color = color_map.get(het_display, "tab:blue")
+    het_display = relabel.get(het_raw) if het_raw is not None else None
 
-    # Label reads "<gene> behaviour" (bare gene), matching the figure.
-    trace_specs = [
-        (wt_id,  "Wildtype behaviour",    color_map["WT"], False),
-        (het_id, f"{genename} behaviour", het_color,       True),
-    ]
-
-
-
-
-    for row, (mid, label, col, show_x) in enumerate(trace_specs):
-        ax_tr = fig.add_subplot(gs_a[row, 1])
-        fed = _fed_for_mouse(fed_list, metadata_df, mid)
-        
-        if fed is None:
-            # Missing session shouldn't kill the whole composite.
-            status.warn(f"L4: no FED session found for Mouse_ID {mid}; blank trace.")
-            ax_tr.axis("off")
-            continue
-        _plot_pleft_core(fed, ax_tr, line_color=col,
-                         behaviour_label=label, show_xlabel=show_x)
-        
-        # turn off all axis
-        ax_tr.axis("off")
-        
-        if row == 1:
-            # add reward side text
-            ax_tr.text(1.01, 1.05, "Rewarded Side", transform=ax_tr.transAxes,
-                       ha="left", va="bottom", color="0.5", fontsize = 12)
-
-            # Add arrow for both plots
-            ax_tr.annotate("",
-                    xy=(1.0, -0.2), xytext=(0.15, -0.2),
-                    xycoords="axes fraction",
-                    annotation_clip=False,  # don't clip content drawn above the axes
-                    arrowprops=dict(arrowstyle="->", lw=5, color="0.6"))
-
-            # Label for arrow independently
-            ax_tr.text(0.07, -0.28, "3 days", transform=ax_tr.transAxes,
-                       ha="left", va="bottom", color="0.5")
+    ax_ex = fig.add_subplot(gs_top[0, 1])
+    core._panel_label(ax_ex, "B)")
+    fed_ex, mid_ex = _pick_example_fed(
+        long_df, fed_list, metadata_df, target_group=het_display, min_blocks=10,
+    )
+    if fed_ex is None:
+        status.warn("L4: no usable FED session for the example trace; panel B blank.")
+        ax_ex.axis("off")
+    else:
+        status.ok(f"L4 example mouse -> {mid_ex}")
+        _plot_pr_trace_core(fed_ex, ax_ex, show_xlabel=True)
 
 
-
-    ##### Panel B-left: reverse-learning line plot #####
-    ax_line = fig.add_subplot(gs[1, 0])
-    _panel_label(ax_line, "B)")          
-    _rev_learning_core(rev_df, ax_line, 
-                       palette_map = color_map, 
-                       group_order = group_order)
-
+    ##### Panel C: grouped demand curve #####
+    ax_dem = fig.add_subplot(gs_top[0, 2])
+    core._panel_label(ax_dem, "C)")
+    _demand_curve_core(long_df, ax_dem, color_map, group_order)
+    # In the multi-mutant case, prefix the gene name onto non-WT legend entries.
     if multi:
-        leg = ax_line.get_legend()
+        leg = ax_dem.get_legend()
         if leg is not None:
             for txt in leg.get_texts():
                 if txt.get_text().upper() != "WT":
                     txt.set_text(f"{genename} {txt.get_text()}")
 
-
-    ##### Panels B-bar / C / D / E: metrics#####
+    ##### Panels D-H: metric bars #####
     # (long_df variable name, y-axis label shown on the panel)
     metric_specs = [
-        ("PeakAccuracy", "Peak Accuracy %"),
-        ("Total_pokes",  "Total pokes"),
-        ("Win-stay",     "Win-stay"),
-        ("Lose-shift",   "Lose-shift"),
+        ("Daily_Pellets",   "Daily Pellets"),
+        ("Total_Pokes",     "Total Pokes"),
+        ("MedianBreakPoint", "Median Break Point"),
+        ("Demand_alpha_FR", "alpha"),
+        ("Demand_beta_FR",  "Slope"),
     ]
-
-    # specify the panel letters for each bar plot metric
-    bar_panel_letters = {2: "C)", 3: "D)", 4: "E)"}
+    bar_panel_letters = ["D)", "E)", "F)", "G)", "H)"]
 
     shared_handles = []
-    for col, (metric, ylabel) in enumerate(metric_specs, start=1):
-        ax_bar = fig.add_subplot(gs[1, col])
-        # assign bar plot panels
-        if col in bar_panel_letters:
-            _panel_label(ax_bar, bar_panel_letters[col])
+    for col, (metric, ylabel) in enumerate(metric_specs):
+        ax_bar = fig.add_subplot(gs_bot[0, col])
+        core._panel_label(ax_bar, bar_panel_letters[col])
         sub = long_df[long_df["variable"] == metric]
         # Guard: a model missing a metric shouldn't crash the whole composite.
         if sub["value"].dropna().empty:
             status.warn(f"L4: no data for {metric}; leaving panel blank.")
             ax_bar.axis("off")
             continue
-        handles = _plot_metric_display(
+        handles = core._plot_metric_display(
             sub, metric, ax_bar, color_map,
             group_order=group_order, hue_order=hue_order, ylabel=ylabel,
             xlabel=(genename if multi else ""),
         )
-        # Keep the first non-empty proxy set for the single shared legend.
         if handles and not shared_handles:
             shared_handles = handles
 
-    # --- One shared Sex legend for the whole figure (top-right) ---
+    # --- One shared Sex legend for the whole figure ---
     if shared_handles:
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="lower right", frameon=False,
-            bbox_to_anchor=(0.95, 0.35),
+            bbox_to_anchor=(0.98, 0.30),
         )
 
-    
-
     # --- Caption block beneath the panels ---
-    # Assembled line-by-line (each string ends with a space) so the joins never
-    # run words together, with explicit \n where a visible line break is wanted.
     caption = (
-        "A) FED3 device and example behaviour schematic. "
-        "B) Line plot and bar graph of peak accuracy in the 10 trials around a switch.\n"
-        "C, D, E) Bar graphs of mean total pokes, win-stay and lose-shift respectively.\n"
-        "Win-stay: after a reward, did the mouse choose the same port again. "
-        "Lose-shift: after no reward, did it choose the opposite port.\n"
+        "A) FED3 device and PR task schematic. "
+        "B) Individual mouse histogram: each earned pellet plotted at how many pokes "
+        "(block depth) it took to earn it.\n"
+        "C) Grouped demand curve showing mean alpha (the price at which consumption "
+        "halves) and slope of the curve.\n"
+        "D, E, F, G, H) Bar graphs of mean daily pellets, total pokes, median break "
+        "point, alpha and slope respectively.\n"
         "Statistics: two-way ANOVA; the reported p-value is the genotype effect "
         "(genotype x sex and sex effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
-
-
-    
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=13)
 
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.22)
+    fig.subplots_adjust(bottom=0.20)
 
-    out_path = out_dir / f"{genename}_L4.svg"
+    out_path = out_dir / f"{genename}_PR_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format = "svg")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="svg")
     plt.close(fig)
 
-    status.ok(f"L4 composite saved -> {out_path}")
+    status.ok(f"PR1 L4 composite saved -> {out_path}")
     return out_path
+
+
+#@@@@@@@@@@@@@@@@@@ DEFINE PIPELINE AND CLASS @@@@@@@@@@@@@@@@@@#
+
+@dataclass
+class PRResult:
+    """Everything the L1->L4 run produced, so callers can inspect or re-plot
+    any stage without rerunning the pipeline. Beats returning a bare tuple of
+    a dozen values — attributes are self-documenting and order-independent."""
+    fed_list: list
+    key_df2: object
+    saved_paths_indv: list
+    pm_md: object          # essentailly the L3, bandit metrics and metadata
+    pm_long: object        # melted version og bm_md
+    l3_path: Path
+    barplot_paths: list
+    l4_path: Path
+
+
+
+
+def run_pr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None, dpi=300):
+    """Run the full PR pipeline from an L1 zip to the L4 composite figure.
+
+    Orchestration only — every step delegates to the existing public
+    functions, so this stays a readable table of contents for the pipeline.
+
+    Args:
+        l1_path, key_path, root_path : the three inputs your notebook sets by hand.
+        bandittype; String | None
+            accepts "bandit100" & "bandit80" in order to properly create the schematics.
+        colors; optional {group: color} override. If None, falls back to
+            define_aesthetics' defaults so the function runs headless (no widget
+            interaction required).
+        dpi; int 
+            save resolution passed through to assemble_l4.
+
+    """
+    root_path = Path(root_path)
+
+    # ------ Ingest data ------ #
+    # call to lkoad lists and ingest the data from the l1 folder
+    fed_list, loaded_files, session_types = core.ingest_l1(l1_path)
+
+    # ------ Create Meta Data Key ------ #
+    # upload key file
+    key_df, msg = core._read_key_from_upload(key_path)
+
+    # build key dataframe
+    key_df2 = core.build_or_rematch_key_df(loaded_files, session_types, key_df, msg_hint = f"Key status: {msg}")
+
+    # Create Individual PR1 plots
+    saved_paths_indv = pr1_indv_plots(fed_list, key_df2, root_path)
+
+    # --- Individual plots + metrics -> L3 ---
+    # Clean PR1 metadata
+    meta_cols, md = core.build_metakey(key_df2, assay = "bandit")
+
+    # Find ID columns
+    id_col, other_id = core.pick_match_method(md)
+
+    # compute PR metrics
+    pm = compute_pr_metrics(fed_list, md)
+
+    pm_md = core.attach_meta(pm, md, id_col)
+
+    # Build the l3
+    l3_path = core.output_l3(pm_md, id_col, other_id, meta_cols, root_path, assay = "pr1", )
+
+    # Build groupings
+    mapped_df = core.build_group_selections(md)
+
+    # attach the grouping dataframe to the metrics
+    pm_grps_df = core.merge_group_selections(pm_md, mapped_df)
+
+    # --- Plot PR --- #
+    # Melt the metric dataframe to long format
+    pm_long = core.melt_metric(pm_grps_df, assay = "pr1")
+
+    # Create variables to control aesthetics
+    x_checks, x_colors, ordered_x = core.define_aesthetics(pm_long)
+
+    # Actually create the bar plots 
+    barplot_paths = core._run_plots(pm_long, x_checks, x_colors, ordered_x, root_path)
+
+    # Honor a caller-supplied palette; otherwise use the aesthetics defaults.
+    x_checks, x_colors, ordered_x = core.define_aesthetics(pm_long)
+    if colors is not None:
+        x_colors = colors
+    
+    # --- Plot demand curve --- #
+    fig, stats = plot_group_mean_demand_with_params(mapped_df, pm_grps_df, md, x_colors)
+
+    l4_path = assemble_pr_l4(pm_long, x_colors, ordered_x, pm_md, root_path, fed_list=fed_list, metadata_df=key_df2)
+
+    return PRResult(fed_list, key_df2, saved_paths_indv, pm_md, pm_long,
+                        l3_path, barplot_paths, l4_path)
