@@ -6,7 +6,7 @@ This library was created for the intention of of automating a analysis pipeline 
 
 The pipeline created by this library is meant to ingest L1 files alongside their key file and automate the process of creating an L4. Anything besides that functionality is outside the scope of the intended pipeline. 
 
-eric was wrong
+eric was wrong, dead wrong
 
 ## Sub Library Architecture
 This library consists of sub libraries in this specific heiarchy:
