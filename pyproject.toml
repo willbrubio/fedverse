@@ -8,11 +8,17 @@ version = "0.1.0"
 description = "FED3 multi-assay analysis pipeline (SSPsyGene)"
 requires-python = ">=3.10"
 # Runtime deps your extracted/own code actually imports.
-# Add scipy when you bring in the PR1 demand-curve fitting.
 dependencies = [
-    "pandas",
+    "pandas<3",
     "numpy",
     "matplotlib",
+    "scipy",
+    "seaborn",
+    "statsmodels",
+    "pingouin",
+    "tqdm",
+    "ipywidgets",
+    "openpyxl",
 ]
 
 # Tells setuptools the packages live under src/ (the src-layout).

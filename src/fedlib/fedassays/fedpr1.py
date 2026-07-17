@@ -16,6 +16,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.stats import sem
 from itertools import cycle
+from IPython.display import display
 
 # Import cousins
 from fedlib.fedutils.fedlog import status
@@ -911,7 +912,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
                    fed_list, metadata_df, *, bandittype=None, schematic_path=None, dpi=300):
     """
     Assemble the composite "L4" deliverable figure for one knockout model on the
-    Progressive Ratio (PR1) task, mirroring the published FMR1 PR figure:
+    Progressive Ratio (PR1) task, mirroring the published PR figure:
 
         A) FED3 + PR task schematic (device image) with the gene name as the title
         B) one example mouse's pellet histogram (earned pellet vs. effort/block depth,
@@ -1044,7 +1045,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
     else:
         status.warn(f"L4: schematic image not found ({schematic_path}); panel A blank.")
-    ax_schem.set_title(genename, loc="left", fontsize=20, fontweight="bold")
+    ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold", y=1.2)
 
     ##### Panel B: example mouse pellet histogram #####
     # Force the example to be a het mouse: recover HET's final display label (the

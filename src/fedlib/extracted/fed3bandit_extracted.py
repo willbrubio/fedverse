@@ -15,7 +15,6 @@ import copy
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-import pkg_resources
 
 
 def filter_data(data_choices, skip=[]):

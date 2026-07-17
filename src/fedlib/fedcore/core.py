@@ -69,11 +69,18 @@ ASSAY_COLS = {
     },
     "fr1": {
         "meta": [
-            # Fill in fr1 meta cols
+            "Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", 
+            "Condition", "Task"
         ],
         "metric": [
-            # fill in real fr1 metrics
-        ],
+            "Pellets", "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy",
+            "PokesPerPellet", "RetrievalTime", "InterPelletInterval", "PokeTime",
+            "%MealPellets", "%GrazingPellets", "NumMeals", "AvgMealSize",
+            "AvgMealDuration", "RecordingHours", "MealsPerHour",
+            "Daily_Pellets", "Left Poke with Pellet","Within_meal_pellet_rate",
+            "%MealPellets_Day","%GrazingPellets_Day","Pellets_Day","NumMeals_Day","AvgMealSize_Day","AvgMealDuration_Day","MealsPerHour_Day","Accuracy_Day",
+            "%MealPellets_Night","%GrazingPellets_Night","Pellets_Night","NumMeals_Night","AvgMealSize_Night","AvgMealDuration_Night","MealsPerHour_Night","Accuracy_Night",
+        ]
     },
 }
 
@@ -190,6 +197,27 @@ def with_session_suffix_for_csv(df, metrics, session_col="_Session_type_for_csv"
     return df.drop(columns=[session_col])
 
 
+def _safe_col(df, candidates):
+    """
+    Called by:
+        _prep_events
+        _pellet_times_from_df : fr1
+    """
+    norm = lambda s: str(s).strip().lower().replace('-', '_').replace(' ', '_')
+    lmap = {norm(c): c for c in df.columns}
+    for cand in candidates:
+        key = norm(cand)
+        if key in lmap:
+            return lmap[key]
+    return None
+
+def _prep_events(df):
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None:
+        return df.iloc[0:0].copy(), None
+    return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
+
+
 ### ------ Attach metadata to metrics ------ ###
 def attach_meta(metric_df, md, id_col):
     """
@@ -209,6 +237,10 @@ def attach_meta(metric_df, md, id_col):
 
     status.step("Attaching metadata to metrics")
     df = metric_df.copy()
+
+    # catch instances where the filename column may be "File" instead of "filename"
+    if "File" in df.columns:
+        df["filename"] = df["File"].astype(str).map(_basename)
 
 
     if "filename" in md.columns and "Mouse_ID" in md.columns:
@@ -231,6 +263,7 @@ def attach_meta(metric_df, md, id_col):
                     if len(best) == 1:
                         df.at[i, "Mouse_ID"] = best[0]
 
+    # check if the id_col is mouse_id and if both dataframes have a mouse_id column and if the mouse_id column in the metric dataframe has any non-null values
     if (id_col == "Mouse_ID") and ("Mouse_ID" in df.columns) and ("Mouse_ID" in md.columns) and df["Mouse_ID"].notna().any():
         md_unique = md.drop_duplicates(subset=["Mouse_ID"], keep="first")
         df_md = df.merge(md_unique, on="Mouse_ID", how="left", suffixes=("", "_md"))
@@ -242,6 +275,7 @@ def attach_meta(metric_df, md, id_col):
 
     status.ok("metadata attached")
     status.preview(df_md, msg="merged metric dataframe")
+
     return df_md
 
 
@@ -557,7 +591,7 @@ def build_or_rematch_key_df(loaded_files, session_types, key_df = None, msg_hint
         #with status_box:
         #clear_output(wait=True)
         status.sub("Key status: No key provided; showing bare-bones Key_Df.")
-        return
+        return Key_Df
 
     # Identify key capabilities
     scan = _scan_key_columns(key_df)
@@ -868,7 +902,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
 
 def _norm_val(x):
     """
-    Called in:
+    Called by:
         _build_group_row
     """
     s = str(x).strip()
@@ -878,7 +912,7 @@ def _norm_val(x):
 
 def _build_group_row(row, ordered_cols):
     """
-    Called in:
+    Called by:
         build_mapping
     """
     if not ordered_cols:
@@ -887,7 +921,7 @@ def _build_group_row(row, ordered_cols):
 
 def _build_file_column(df):
     """
-    Called in:
+    Called by:
         build_mapping
     """
     if "filename" in df.columns:
@@ -1079,6 +1113,7 @@ def melt_metric(df_l3, x_group = "Genotype", hue_group = "Sex", assay = None):
         raise RuntimeError("No numeric metric columns found among expected Bandit metrics.")
 
     candidate_id_vars = ["Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
+
     id_vars = [c for c in candidate_id_vars if c in df.columns]
     for need in ["XGroup","HueGroup","filename"]:
         if need not in id_vars: id_vars.append(need)
