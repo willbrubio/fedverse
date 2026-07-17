@@ -1540,6 +1540,19 @@ def _posthoc_pairs_anova(dfm, pair_list, x_label, hue_label):
             lines.append(f"{a} vs {b}: p={_fmt_p_num(res['p_x'])} {_p_to_stars(res['p_x'])}")
     return " | ".join(lines) if lines else "n/a"
 
+def _fmt_eta_p2(value):
+    """
+    Format partial eta squared to three decimal places.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+
+    if not np.isfinite(value):
+        return "n/a"
+
+    return f"{value:.3f}"
 
 def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=None):
     x_label_name = _grouping_label("X")
@@ -1562,7 +1575,9 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
                 "Subjects": subjects,
                 "F value interaction": "n/a",
                 "p value interaction": "n/a",
+                "Partial eta squared interaction": "n/a",
                 "Main effects": stats.get("err", "unknown error"),
+                "Partial eta squared main effects": "n/a",
                 "Post hoc test": "n/a",
                 "Post hoc results": "n/a",
             })
@@ -1575,14 +1590,33 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
                 f"{hue_label_name}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}, "
                 f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
             )
+            main_effect_sizes = (
+                f"{x_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}; "
+                f"{hue_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_h'])}"
+            )
+
             f_int = _fmt_F(stats["df_int_num"], stats["df_int_den"], stats["F_int"])
             p_int = _fmt_p_num(stats["p_int"]) + (f" {_p_to_stars(stats['p_int'])}" if np.isfinite(stats["p_int"]) else "")
+            if np.isfinite(stats["p_int"]):
+                stars = _p_to_stars(stats["p_int"])
+                if stars:
+                    p_int += f" {stars}" 
+            eta_p_int = _fmt_eta_p2(
+                stats["eta_p_int"]
+            )
         else:
             main_effects = (
                 f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
                 f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
             )
-            f_int, p_int = "n/a", "n/a"
+            main_effect_sizes = (
+                f"{x_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}"
+            )
+            f_int, p_int, eta_p_int = "n/a", "n/a", "n/a"
+
 
         if mode == "ref":
             posthoc_test = "Unpaired t-tests vs reference"
@@ -1597,7 +1631,9 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
             "Subjects": subjects,
             "F value interaction": f_int,
             "p value interaction": p_int,
+            "Partial eta squared interaction": eta_p_int,
             "Main effects": main_effects,
+            "Partial eta squared main effects": main_effect_sizes,
             "Post hoc test": posthoc_test,
             "Post hoc results": posthoc_res,
         })
