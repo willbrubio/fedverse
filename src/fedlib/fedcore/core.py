@@ -1440,7 +1440,34 @@ def _twoway_anova_full(df):
         if n_h >= 2:
             model = ols("value ~ C(XGroup) + C(HueGroup) + C(XGroup):C(HueGroup)", data=d).fit()
             an = sm.stats.anova_lm(model, typ=2)
-            df_den = int(model.df_resid)
+
+            residual_row = "Residual"
+            ss_error = float(an.loc[residual_row, "sum_sq"])
+            df_den = int(an.loc[residual_row, "df"])
+
+            ss_x = float(an.loc["C(XGroup)", "sum_sq"])
+            ss_h = float(an.loc["C(HueGroup)", "sum_sq"])
+            ss_int = float(
+                an.loc["C(XGroup):C(HueGroup)", "sum_sq"]
+            )
+
+            eta_p_x = (
+                ss_x / (ss_x + ss_error)
+                if (ss_x + ss_error) > 0
+                else np.nan
+            )
+
+            eta_p_h = (
+                ss_h / (ss_h + ss_error)
+                if (ss_h + ss_error) > 0
+                else np.nan
+            )
+
+            eta_p_int = (
+                ss_int / (ss_int + ss_error)
+                if (ss_int + ss_error) > 0
+                else np.nan
+            )
 
             return {
                 "ok": True,
@@ -1450,29 +1477,48 @@ def _twoway_anova_full(df):
                 "df_x_num": int(an.loc["C(XGroup)", "df"]),
                 "df_x_den": df_den,
                 "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
+                "ss_x": ss_x,
+                "eta_p_x": eta_p_x,
 
                 "F_h": float(an.loc["C(HueGroup)", "F"]),
                 "df_h_num": int(an.loc["C(HueGroup)", "df"]),
                 "df_h_den": df_den,
                 "p_h": float(an.loc["C(HueGroup)", "PR(>F)"]),
+                "ss_h": ss_h,
+                "eta_p_h": eta_p_h,
 
                 "F_int": float(an.loc["C(XGroup):C(HueGroup)", "F"]),
                 "df_int_num": int(an.loc["C(XGroup):C(HueGroup)", "df"]),
                 "df_int_den": df_den,
                 "p_int": float(an.loc["C(XGroup):C(HueGroup)", "PR(>F)"]),
+                "ss_int": ss_int,
+                "eta_p_int": eta_p_int,
+                "ss_error": ss_error,
             }
 
         else:
             model = ols("value ~ C(XGroup)", data=d).fit()
             an = sm.stats.anova_lm(model, typ=2)
 
+            ss_x = float(an.loc["C(XGroup)", "sum_sq"])
+            ss_error = float(an.loc["Residual", "sum_sq"])
+
+            eta_p_x = (
+                ss_x / (ss_x + ss_error)
+                if (ss_x + ss_error) > 0
+                else np.nan
+            )
+
             return {
                 "ok": True,
                 "test": "One-way ANOVA",
                 "F_x": float(an.loc["C(XGroup)", "F"]),
                 "df_x_num": int(an.loc["C(XGroup)", "df"]),
-                "df_x_den": int(model.df_resid),
+                "df_x_den": int(an.loc["Residual", "df"]),
                 "p_x": float(an.loc["C(XGroup)", "PR(>F)"]),
+                "ss_x": ss_x,
+                "eta_p_x": eta_p_x,
+                "ss_error": ss_error,
             }
 
     except Exception as e:
@@ -2017,3 +2063,6 @@ def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
     """
     ax.text(dx, dy, letter, transform=ax.transAxes,
             ha="right", va="bottom", fontsize=fontsize, fontweight="bold")
+
+def _test_function(args):
+    print(f"This is a test function to verify that the code is running correctly.{args}")
