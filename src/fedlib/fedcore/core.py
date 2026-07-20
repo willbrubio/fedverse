@@ -36,6 +36,20 @@ from fedlib.fedutils.fedlog import status
 # Set the alpha for plots
 ALPHA = 0.6  # apply to both bars and dots
 
+
+def set_plot_style(font_family="DejaVu Sans"):
+    """
+    Force one consistent font family across every text element (tick labels,
+    axis labels, captions, titles) so the L4 composites all render in the same
+    typeface.
+    """
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = [
+        font_family, "DejaVu Sans", "Liberation Sans", "sans-serif",
+    ]
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
+
 ### ---- create a set of cuntions to validate the assay argument within core calls --- ###
 
 # Single source of truth for every per-assay column set.
@@ -2063,6 +2077,3 @@ def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
     """
     ax.text(dx, dy, letter, transform=ax.transAxes,
             ha="right", va="bottom", fontsize=fontsize, fontweight="bold")
-
-def _test_function(args):
-    print(f"This is a test function to verify that the code is running correctly.{args}")

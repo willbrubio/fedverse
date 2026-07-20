@@ -1028,11 +1028,12 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     # ---------------- Figure + grid layout ----------------
     # Row 0: A (schematic) | B (example histogram) | C (demand curve, widest).
     # Row 1: five equal-width bar panels D-H.
-    fig = plt.figure(figsize=(16, 9))
+    core.set_plot_style()   # one shared font family across every L4 figure
+    fig = plt.figure(figsize=(16, 8))
     gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
 
-    gs_top = gs[0].subgridspec(1, 3, width_ratios=[0.9, 1.3, 1.8], wspace=0.35)
-    gs_bot = gs[1].subgridspec(1, 5, wspace=0.55)
+    gs_top = gs[0].subgridspec(1, 3, width_ratios=[1.2, 1.3, 1.8], wspace=0.25)
+    gs_bot = gs[1].subgridspec(1, 5, wspace=0.75)
 
     ##### Panel A: schematic #####
     if schematic_path is None:
@@ -1040,12 +1041,14 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
 
     ax_schem = fig.add_subplot(gs_top[0, 0])
     ax_schem.axis("off")
-    core._panel_label(ax_schem, "A)", dx=0.05, dy=0.75)
+    core._panel_label(ax_schem, "A)", dx=0.00, dy=0.75)
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
     else:
         status.warn(f"L4: schematic image not found ({schematic_path}); panel A blank.")
     ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold", y=1.2)
+    
+    
 
     ##### Panel B: example mouse pellet histogram #####
     # Force the example to be a het mouse: recover HET's final display label (the
@@ -1113,25 +1116,20 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="lower right", frameon=False,
-            bbox_to_anchor=(0.25, 0.50),
+            bbox_to_anchor=(0.125, 0.55),
         )
 
     # --- Caption block beneath the panels ---
     caption = (
-        "A) FED3 device and PR task schematic. "
-        "B) Individual mouse histogram: each earned pellet plotted at how many pokes "
-        "(block depth) it took to earn it.\n"
-        "C) Grouped demand curve showing mean alpha (the price at which consumption "
-        "halves) and slope of the curve.\n"
-        "D, E, F, G, H) Bar graphs of mean daily pellets, total pokes, median break "
-        "point, alpha and slope respectively.\n"
-        "Statistics: two-way ANOVA; the reported p-value is the genotype effect "
-        "(genotype x sex and sex effects are in the stats table)."
+        "A) FED3 device and PR task schematic. B) Individual mouse histogram: each earned pellet plotted at how many pokes (block depth)\n"
+        "it took to earn it. C) Grouped demand curve showing mean alpha (the price at which consumption halves) and slope of the curve. \n"
+        "D, E, F, G, H) Bar graphs of mean daily pellets, total pokes, median break point, alpha and slope respectively. \n"
+        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=13)
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
 
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.20)
+    fig.subplots_adjust(bottom=0.22)
 
     out_path = out_dir / f"{genename}_PR_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.

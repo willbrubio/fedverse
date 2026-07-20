@@ -1164,24 +1164,23 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     # ---------------- Figure + grid layout ----------------
-    # Row 0: panel A. 
+    # Row 0: panel A.
     # Row 1: line plot (wide) + four equal-width bar plots.
+    core.set_plot_style()   # one shared font family across every L4 figure
     fig = plt.figure(figsize=(16, 8))
-    gs = fig.add_gridspec(
-        nrows=2, ncols=5,
-        height_ratios=[1.0, 1.4],
-        width_ratios=[3, 1, 1, 1, 1],
-        hspace=0.35, wspace=0.45,
-    )
+    #create a grid space
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
 
+    # define the subgridspecs for the top and bottom rows
+    gs_top = gs[0, :].subgridspec(2, 3, width_ratios=[1, 2, 0.3], hspace=0.25, wspace=0.08)
+    gs_bot = gs[1, :].subgridspec(1, 5, width_ratios=[1.88, 1, 1, 1, 1], wspace=0.45)
+    # bar column ratio should be
+    # a total of 1/7 (0.14) + 0.45 wspace
 
     ##### Panel A  #####
     # schematic (left) + two stacked example traces (right)
     # Nested grid so the top row can hold both the image and the two traces.
-    gs_a = gs[0, :].subgridspec(
-        2, 3, 
-        width_ratios=[1, 2, 0.3], 
-        hspace=0.25, wspace=0.08)
+
 
     # Schematic spans both sub-rows on the left; blank if no image supplied.
     # find what bandit version
@@ -1201,15 +1200,14 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         )
 
     # add the bandit schematic
-    ax_schem = fig.add_subplot(gs_a[:, 0])
+    ax_schem = fig.add_subplot(gs_top[:, 0])
     ax_schem.axis("off")
-    core._panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
-    core._panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
+    core._panel_label(ax_schem, "A)", dx=0.05, dy=0.75)
 
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
     # add genename label at title
-    ax_schem.set_title(genename, loc="left", fontsize=20, fontweight="bold")
+    ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold")
 
 
     ### Switching plots ###
@@ -1229,7 +1227,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     for row, (mid, label, col, show_x) in enumerate(trace_specs):
-        ax_tr = fig.add_subplot(gs_a[row, 1])
+        ax_tr = fig.add_subplot(gs_top[row, 1])
         fed = core._fed_for_mouse(fed_list, metadata_df, mid)
         
         if fed is None:
@@ -1262,7 +1260,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     ##### Panel B-left: reverse-learning line plot #####
-    ax_line = fig.add_subplot(gs[1, 0])
+    ax_line = fig.add_subplot(gs_bot[0, 0])
     core._panel_label(ax_line, "B)")          
     _rev_learning_core(rev_df, ax_line, 
                        palette_map = color_map, 
@@ -1290,7 +1288,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
     shared_handles = []
     for col, (metric, ylabel) in enumerate(metric_specs, start=1):
-        ax_bar = fig.add_subplot(gs[1, col])
+        ax_bar = fig.add_subplot(gs_bot[0, col])
         # assign bar plot panels
         if col in bar_panel_letters:
             core._panel_label(ax_bar, bar_panel_letters[col])
@@ -1314,7 +1312,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="lower right", frameon=False,
-            bbox_to_anchor=(0.4, 0.5),
+            bbox_to_anchor=(0.125, 0.62),
         )
 
     

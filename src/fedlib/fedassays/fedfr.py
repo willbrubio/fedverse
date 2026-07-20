@@ -672,9 +672,9 @@ def _plot_ipi_density_core(fed_list, ax, mapped_df, palette_map, group_order, *,
     x_div = np.log10(meal_threshold_min)
     ax.axvline(x_div, color="0.5", linestyle="--", linewidth=1.25)
     ymax = ax.get_ylim()[1]
-    ax.text(x_div - 0.15, ymax * 0.98, "Pellets within a meal",
+    ax.text(x_div - 0.15, ymax * 1.05, "Pellets within a meal",
             color="0.5", ha="right", va="top", fontsize=11)
-    ax.text(x_div + 0.15, ymax * 0.98, "Grazing pellets",
+    ax.text(x_div + 0.15, ymax * 1.05, "Grazing pellets",
             color="0.5", ha="left", va="top", fontsize=11)
 
     ax.set_xlabel("Interpellet Interval (min)", fontsize=13)
@@ -807,11 +807,13 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
     # ---------------- Figure + grid layout ----------------
     # Row 0: A (schematic) + B, C, D, E bars.
     # Row 1: F (IPI density, wide) + G, H bars.
-    fig = plt.figure(figsize=(16, 9))
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.5)
+    core.set_plot_style()   # one shared font family across every L4 figure
+    fig = plt.figure(figsize=(16, 8))
+    #gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.5)
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
 
-    gs_top = gs[0].subgridspec(1, 5, width_ratios=[0.9, 1, 1, 1, 1], wspace=0.5)
-    gs_bot = gs[1].subgridspec(1, 4, width_ratios=[2.4, 0.15, 1, 1], wspace=0.5)
+    gs_top = gs[0, :].subgridspec(1, 5, width_ratios=[1.71, 1, 1, 1, 1], wspace=0.5)
+    gs_bot = gs[1, :].subgridspec(1, 3, width_ratios=[4.15, 1, 1], wspace=0.45)
 
     ##### Panel A: schematic #####
     if schematic_path is None:
@@ -833,7 +835,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
         status.warn(f"L4: schematic image not found ({schematic_path}); panel A blank.")
     # y=1.08 matches _panel_label's default dy, so the gene title sits at the same
     # height as the B)/C)/... panel letters.
-    ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold", y=1.4)
+    ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold", y=1.0)
 
     ##### Panels B-E: top-row metric bars #####
     top_specs = [
@@ -868,7 +870,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
 
     ##### Panel F: inter-pellet-interval density #####
     ax_ipi = fig.add_subplot(gs_bot[0, 0])
-    core._panel_label(ax_ipi, "F)")
+    core._panel_label(ax_ipi, "F)", dx=-0.05, dy=1.05)
     _plot_ipi_density_core(fed_list, ax_ipi, mapped_relabeled, color_map, group_order)
     # In the multi-mutant case, prefix the gene name onto non-WT legend entries.
     if multi:
@@ -884,8 +886,9 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
         ("%MealPellets",        "%Pellets Within a Meal"),
     ]
     bot_letters = ["G)", "H)"]
+    
     for i, (metric, ylabel) in enumerate(bot_specs):
-        ax_bar = fig.add_subplot(gs_bot[0, i + 2])          # cols 2,3 (col 1 is a spacer)
+        ax_bar = fig.add_subplot(gs_bot[0, i + 1])          # cols 2,3 (col 1 is a spacer)
         handles = _draw_bar(ax_bar, metric, ylabel, bot_letters[i])
         if handles and not shared_handles:
             shared_handles = handles
@@ -895,25 +898,21 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="upper right", frameon=False,
-            bbox_to_anchor=(0.55, 0.5),
+            bbox_to_anchor=(0.125, 0.66),
         )
 
     # --- Caption block beneath the panels ---
     caption = (
-        "A) Schematic of the FED3 device and FR1 task. "
-        "B, C, D, E) Bar graphs of the mean daily pellets, accuracy, poke time and "
-        "retrieval time respectively.\n"
-        "F) Histogram of the distribution of inter-pellet intervals: pellets eaten "
-        "less than 60 s apart (within a meal) vs. more than 60 s apart (grazing).\n"
-        "G, H) Bar graphs of the mean inter-pellet interval (IPI) within a meal and "
-        "the percentage of pellets within a meal.\n"
-        "Statistics: two-way ANOVA; the reported p-value is the genotype effect "
-        "(genotype x sex and sex effects are in the stats table)."
+        "A) Schematic of the FED3 device and FR1 task. B, C, D, E) Bar graphs of the mean daily pellets, accuracy, poke time and retrieval\n" 
+        "time respectively. F) Histogram of the distribution of inter-pellet intervals: pellets eaten less than 60 s apart (within a meal)\n"
+        "vs. more than 60 s apart (grazing). G, H) Bar graphs of the mean inter-pellet interval (IPI) within a meal and the percentage of\n"
+        "pellets within a meal.\n"
+        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=13)
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
 
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.20)
+    fig.subplots_adjust(bottom=0.24)
 
     out_path = out_dir / f"{genename}_FR_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
