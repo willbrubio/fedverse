@@ -1204,6 +1204,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     ax_schem = fig.add_subplot(gs_a[:, 0])
     ax_schem.axis("off")
     core._panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
+    core._panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
 
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
@@ -1262,7 +1263,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
     ##### Panel B-left: reverse-learning line plot #####
     ax_line = fig.add_subplot(gs[1, 0])
-    core._panel_label(ax_line, "B)")
+    core._panel_label(ax_line, "B)")          
     _rev_learning_core(rev_df, ax_line, 
                        palette_map = color_map, 
                        group_order = group_order)
