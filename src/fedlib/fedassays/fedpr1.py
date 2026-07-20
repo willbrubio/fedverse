@@ -1113,7 +1113,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="lower right", frameon=False,
-            bbox_to_anchor=(0.98, 0.30),
+            bbox_to_anchor=(0.25, 0.50),
         )
 
     # --- Caption block beneath the panels ---
