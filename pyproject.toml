@@ -1,32 +1,6 @@
+# Build-system declaration only. All package metadata (name, version,
+# dependencies, package-data) lives in setup.py — a [project] table here
+# would take precedence and silently override it.
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[project]
-name = "fedlib"
-version = "0.1.0"
-description = "FED3 multi-assay analysis pipeline (SSPsyGene)"
-requires-python = ">=3.10"
-# Runtime deps your extracted/own code actually imports.
-dependencies = [
-    "pandas<3",
-    "numpy",
-    "matplotlib",
-    "scipy",
-    "seaborn",
-    "statsmodels",
-    "pingouin",
-    "tqdm",
-    "ipywidgets",
-    "openpyxl",
-]
-
-# Tells setuptools the packages live under src/ (the src-layout).
-# It will discover fedlib and fedlib.extracted automatically.
-[tool.setuptools.packages.find]
-where = ["src"]
-
-# Bundle images into the wheel. Key must match the IMPORT package
-# (the folder under src/), which is now "fedlib".
-[tool.setuptools.package-data]
-"fedlib.fedassets" = ["*.png", "*.svg", "*.jpg"]
