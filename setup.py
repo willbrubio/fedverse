@@ -38,7 +38,7 @@ INSTALL_REQUIRES = [
 
 setup(
     name="fedverse",
-    version="0.1.0",
+    version="0.0.1",
     description="FED3 multi-assay analysis pipeline (SSPsyGene)",
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
