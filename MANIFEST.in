@@ -1,9 +1,9 @@
 include README.md
 include LICENSE.md
-include src/fedlib/README.md
-include src/fedlib/extracted/PROVENANCE.md
-include src/fedlib/extracted/LICENSE.*
-recursive-include src/fedlib/fedassets *.png *.svg *.jpg *.jpeg
+include src/fedverse/README.md
+include src/fedverse/extracted/PROVENANCE.md
+include src/fedverse/extracted/LICENSE.*
+recursive-include src/fedverse/fedassets *.png *.svg *.jpg *.jpeg
 
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]

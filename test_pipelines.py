@@ -3,10 +3,10 @@
 #!pip install pingouin
 import sys
 sys.path.insert(0, "src")           # relative to the project root where the notebook runs
-from fedlib.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
-from fedlib.fedcore import core
-from fedlib.fedassays import fedbandit, fedpr1, fedfr
-from fedlib.fedutils.fedlog import status
+from fedverse.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
+from fedverse.fedcore import core
+from fedverse.fedassays import fedbandit, fedpr1, fedfr
+from fedverse.fedutils.fedlog import status
 
 # Import other libraries (will have to kick out to top level)
 import pandas as pd

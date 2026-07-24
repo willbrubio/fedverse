@@ -25,8 +25,8 @@ from statsmodels.formula.api import ols
 import statsmodels.api as sm
 
 # call cousins
-from fedlib.extracted import fed3_loading
-from fedlib.fedutils.fedlog import status 
+from fedverse.extracted import fed3_loading
+from fedverse.fedutils.fedlog import status 
 
 
 #@@@@@@@@@@@@@@@@@@ GLOBAL VARIABLES @@@@@@@@@@@@@@@@@@#
@@ -111,7 +111,7 @@ def get_cols(assay, kind, status):
         # Insurance in case status.fail() is ever changed to not raise.
         raise ValueError(f"assay={assay!r} not in {allowed}")
 
-    # Internal validation: a bad `kind` is a bug in fedlib, not user input —
+    # Internal validation: a bad `kind` is a bug in fedverse, not user input —
     # so raise KeyError-style rather than routing it through status.fail.
     if kind not in ASSAY_COLS[assay]:
         raise KeyError(

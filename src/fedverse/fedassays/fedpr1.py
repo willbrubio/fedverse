@@ -19,10 +19,10 @@ from itertools import cycle
 from IPython.display import display
 
 # Import cousins
-from fedlib.fedutils.fedlog import status
-from fedlib.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
-from fedlib import fedassets
-from fedlib.fedcore import core
+from fedverse.fedutils.fedlog import status
+from fedverse.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
+from fedverse import fedassets
+from fedverse.fedcore import core
 
 
 

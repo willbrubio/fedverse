@@ -1,4 +1,4 @@
-"""Packaging config for fedlib.
+"""Packaging config for fedverse.
 
 Classic setuptools setup() — this file is the single source of truth for
 package metadata. pyproject.toml is kept for the build-system declaration
@@ -7,7 +7,7 @@ table wins and the value here is silently ignored.
 
 Build and upload:
     python -m pip install --upgrade build twine
-    python -m build                 # -> dist/fedlib-<ver>.tar.gz + .whl
+    python -m build                 # -> dist/fedverse-<ver>.tar.gz + .whl
     python -m twine check dist/*
     python -m twine upload dist/*
 """
@@ -19,7 +19,7 @@ from setuptools import find_packages, setup
 HERE = Path(__file__).parent
 LONG_DESCRIPTION = (HERE / "README.md").read_text(encoding="utf-8")
 
-# Runtime deps — every third-party package imported under src/fedlib.
+# Runtime deps — every third-party package imported under src/fedverse.
 # pandas is pinned <3 because the extracted fed3/fed3bandit code relies on
 # pandas 2.x behaviour that the 3.0 release changes.
 INSTALL_REQUIRES = [
@@ -37,25 +37,25 @@ INSTALL_REQUIRES = [
 ]
 
 setup(
-    name="fedlib",
+    name="fedverse",
     version="0.1.0",
     description="FED3 multi-assay analysis pipeline (SSPsyGene)",
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
     author="William Rubio",
     author_email="bernard.william@gmail.com",
-    url="https://github.com/willbrubio/fedlib",
+    url="https://github.com/willbrubio/fedverse",
     project_urls={
-        "Source": "https://github.com/willbrubio/fedlib",
-        "Issues": "https://github.com/willbrubio/fedlib/issues",
+        "Source": "https://github.com/willbrubio/fedverse",
+        "Issues": "https://github.com/willbrubio/fedverse/issues",
     },
     license="MIT",
-    license_files=["LICENSE.md", "src/fedlib/extracted/LICENSE.*"],
+    license_files=["LICENSE.md", "src/fedverse/extracted/LICENSE.*"],
     # src-layout: importable packages live under src/, not at the repo root.
     package_dir={"": "src"},
     packages=find_packages(where="src"),
-    # Schematic images resolved at runtime by fedlib.fedassets.get().
-    package_data={"fedlib.fedassets": ["*.png", "*.svg", "*.jpg", "*.jpeg"]},
+    # Schematic images resolved at runtime by fedverse.fedassets.get().
+    package_data={"fedverse.fedassets": ["*.png", "*.svg", "*.jpg", "*.jpeg"]},
     include_package_data=True,
     zip_safe=False,  # fedassets.get() walks the package directory on disk
     python_requires=">=3.10",

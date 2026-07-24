@@ -1,6 +1,6 @@
-# fedlib
+# fedverse
 
-The purpose of fedlib is to create a unifying package of libraries that concern themselves with the analysis of FED devices in conjunction with the established workflow for the SSPsyGene project. Currently, fedlib inherits functions from fed3bandit written by Alex Legaria (https://fed3bandit.readthedocs.io/en/latest/analysis/fed3live_api.html) and the fed3 library written by Tom Earnest (https://earnestt1234.github.io/fed3/fed3/index.html). Additionally, this library includes code written for FED3Analyses by Chantelle Murrell (https://github.com/KravitzLab/FED3Analyses). 
+The purpose of fedverse is to create a unifying package of libraries that concern themselves with the analysis of FED devices in conjunction with the established workflow for the SSPsyGene project. Currently, fedverse inherits functions from fed3bandit written by Alex Legaria (https://fed3bandit.readthedocs.io/en/latest/analysis/fed3live_api.html) and the fed3 library written by Tom Earnest (https://earnestt1234.github.io/fed3/fed3/index.html). Additionally, this library includes code written for FED3Analyses by Chantelle Murrell (https://github.com/KravitzLab/FED3Analyses). 
 
 This library was created for the intention of of automating a analysis pipeline for the WUSMAC SSPsyGene analysis of FED devices. 
 

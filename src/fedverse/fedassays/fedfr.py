@@ -14,9 +14,9 @@ from pathlib import Path
 from IPython.display import display, HTML
 
 # call cousins
-from fedlib.fedutils.fedlog import status
-from fedlib.fedcore import core
-from fedlib import fedassets
+from fedverse.fedutils.fedlog import status
+from fedverse.fedcore import core
+from fedverse import fedassets
 
 
 
