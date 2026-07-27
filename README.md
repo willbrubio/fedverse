@@ -7,6 +7,38 @@ This library was created for the intention of of automating a analysis pipeline 
 The pipeline created by this library is meant to ingest L1 files alongside their key file and automate the process of creating an L4. Anything besides that functionality is outside the scope of the intended pipeline. 
 
 
+## Install Instructions
+To install this library you can run:
+```
+pip install fedverse
+```
+
+## import fedverse
+Youcan import different sub modules by calling them out:
+```
+import fedverse
+from fedverse.fedcore import core
+from fedverse.fedassays import fedbandit, fedfr, fedpr1
+```
+
+## Run Pipeline
+This package is built for to analyze SSPsyGene behavioral data. To that end the core function of this library is to support the pipeline functions that will create an "L4" deliverable for bandit, PR, and FR assays. The pipeine requires the path to fed files within a zipped folder and the path to SSPsyGene style key as well as the path you want outputs to be written in to. Additionally, the bandit pipeline allows for a "bandittype" argument to be passed in to differentiate bandit 80 & 100 schematics. Run the pipelines as follows:  
+```
+# Bandit Pipeline
+root = Path(r"your/path/here")
+res = fedbandit.run_bandit_l1_l4(root / "Bandit100_L1.zip",
+                                 root / "Bandit_Key.xlsx", root, bandittype = "100")
+
+# FR Pipeline
+res = fedfr.run_fr_l1_l4(root / "FR_L1.zip",
+                          root / "FR_Key.xlsx", root)
+
+# PR1 Pipeline
+res = fedpr1.run_pr_l1_l4(root / "PR1_L1.zip",
+                          root / "PR1_Key.xlsx", root)
+```
+
+
 ## Sub Library Architecture
 This library consists of sub libraries in this specific heiarchy:
 ```

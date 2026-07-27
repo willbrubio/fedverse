@@ -20,8 +20,7 @@ HERE = Path(__file__).parent
 LONG_DESCRIPTION = (HERE / "README.md").read_text(encoding="utf-8")
 
 # Runtime deps — every third-party package imported under src/fedverse.
-# pandas is pinned <3 because the extracted fed3/fed3bandit code relies on
-# pandas 2.x behaviour that the 3.0 release changes.
+# fed3 and fed3 bandit code relies on pandas<3
 INSTALL_REQUIRES = [
     "pandas<3",
     "numpy",
@@ -32,7 +31,7 @@ INSTALL_REQUIRES = [
     "pingouin",
     "tqdm",
     "ipywidgets",
-    "ipython",       # IPython.display, used by the assay plotting helpers
+    "ipython",       # IPython.display: used by the assay plotting helpers
     "openpyxl",      # engine for pd.ExcelFile / read_excel on .xlsx L1 files
 ]
 
