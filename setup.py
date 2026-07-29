@@ -5,11 +5,14 @@ package metadata. pyproject.toml is kept for the build-system declaration
 only; if you move a metadata field back into a [project] table there, that
 table wins and the value here is silently ignored.
 
-Build and upload:
+Build and upload (PowerShell). Clear dist/ first and name the version
+explicitly on upload — `dist/*` will happily re-publish stale artifacts from
+an earlier build, and a version once on PyPI can only be yanked, not replaced.
     python -m pip install --upgrade build twine
+    Remove-Item dist\* -Force -ErrorAction SilentlyContinue
     python -m build                 # -> dist/fedverse-<ver>.tar.gz + .whl
-    python -m twine check dist/*
-    python -m twine upload dist/*
+    python -m twine check dist\fedverse-<ver>*
+    python -m twine upload --skip-existing dist\fedverse-<ver>*
 """
 
 from pathlib import Path
