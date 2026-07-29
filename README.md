@@ -14,7 +14,7 @@ pip install fedverse
 ```
 
 ## import fedverse
-Youcan import different sub modules by calling them out:
+You can import different sub modules by calling them out:
 ```
 import fedverse
 from fedverse.fedcore import core

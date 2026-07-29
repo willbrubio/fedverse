@@ -1364,6 +1364,7 @@ class BanditResult:
     rev_df: object
     l3_path: Path
     barplot_paths: list
+    stats_df: object
     l4_path: Path
 
 
@@ -1415,12 +1416,17 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
         x_colors = colors
     barplot_paths = core._run_plots(bm_long, x_checks, x_colors, ordered_x, root_path)
 
-    # --- Peak accuracy + L4 composite (cells 8-9) ---
+    # --- Peak accuracy + L4 composite + stats table ---
     basenames, xgroups = prep_pa_groups(mapped_df)
     rev_df = build_rev_df(fed_list, xgroups, basenames)
     #plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path)
+
+    # --- stats table --- #
+    stats_df = core.build_stats_table(bm_long, ordered_x, root_path, assay="bandit")
+
+    # --- L4 --- #
     l4_path = assemble_bandit_l4(bm_long, rev_df, x_colors, ordered_x, bm_md,
                           root_path, fed_list, metadata_df, bandittype = bandittype, dpi=dpi)
 
     return BanditResult(fed_list, metadata_df, bm_md, bm_long, rev_df,
-                        l3_path, barplot_paths, l4_path)
+                        l3_path, barplot_paths, stats_df, l4_path)

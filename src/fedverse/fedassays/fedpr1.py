@@ -1135,7 +1135,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="svg")
     plt.close(fig)
-
+    
     status.ok(f"PR1 L4 composite saved -> {out_path}")
     return out_path
 
@@ -1154,6 +1154,7 @@ class PRResult:
     pm_long: object        # melted version og bm_md
     l3_path: Path
     barplot_paths: list
+    stats_df: object
     l4_path: Path
 
 
@@ -1231,7 +1232,12 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None
     # --- Plot demand curve --- #
     fig, stats = plot_group_mean_demand_with_params(mapped_df, pm_grps_df, md, x_colors)
 
+    # --- build stats table --- #
+    stats_df = core.build_stats_table(pm_long, ordered_x, root_path, assay="pr1")
+
+    # --- Build L4 --- #
     l4_path = assemble_pr_l4(pm_long, x_colors, ordered_x, pm_md, root_path, fed_list=fed_list, metadata_df=key_df2)
 
+    ### Return PR class ###
     return PRResult(fed_list, key_df2, saved_paths_indv, pm_md, pm_long,
-                        l3_path, barplot_paths, l4_path)
+                        l3_path, barplot_paths, stats_df, l4_path)

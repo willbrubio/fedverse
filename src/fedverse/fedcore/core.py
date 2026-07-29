@@ -50,7 +50,7 @@ def set_plot_style(font_family="DejaVu Sans"):
     plt.rcParams["pdf.fonttype"] = 42
     plt.rcParams["ps.fonttype"] = 42
 
-### ---- create a set of cuntions to validate the assay argument within core calls --- ###
+### ---- create a set of functions to validate the assay argument within core calls --- ###
 
 # Single source of truth for every per-assay column set.
 # Structure: assay -> kind -> columns. Keeping meta and metric side by side
@@ -810,28 +810,15 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
 
     # prepare the L3 Directory for population
     status.sub("Creating L3 directory")
+
     out_dir = Path(root_path, "L3")
     out_dir.mkdir(parents=True, exist_ok=True)
+
     status.ok("L3 directory created")
 
     df = df_md.copy()
 
-    # determine which assay and metric columns to return
-    #if assay == "bandit":
-    #    metric_cols = [
-    #        "Win-stay", "Lose-shift", "PeakAccuracy", "Total_pellets", "Total_pokes",
-    #        "PokesPerPellet", "RetrievalTime", "PokeTime", "Daily_Pellets",
-    #        "Inactive_Pokes", "Active_Pokes", "Weight",
-    #        "Win-stay_Day", "Win-stay_Night", "Lose-shift_Day", "Lose-shift_Night",
-    #        "PeakAccuracy_Day", "PeakAccuracy_Night","Left Poke with Pellet","Right_Poke",]
-    #elif assay == "pr":
-    #    metric_cols = [
-    #       "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy", "PokesPerPellet",
-    #        "MedianBreakPoint", "Numberofblocks", "Daily_Pellets",
-    #        "Demand_Q0_raw", "Demand_alpha_raw", "Demand_beta_raw",
-    #        "Demand_alpha_FR", "Demand_beta_FR",]
-    #else:
-    #    status.fail("Argument 'assay' needs to be supplied with one of the following: 'bandit', 'pr1', or 'fr1'.")
+    # get metric columns based on assay type
     metric_cols = get_cols(assay, "metric", status)
 
     # check for agreement between columns in metric file and columns specified
@@ -1126,7 +1113,7 @@ def melt_metric(df_l3, x_group = "Genotype", hue_group = "Sex", assay = None):
     if not metric_cols:
         raise RuntimeError("No numeric metric columns found among expected Bandit metrics.")
 
-    candidate_id_vars = ["Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
+    candidate_id_vars = ["Gene", "Gene_ID", "Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
 
     id_vars = [c for c in candidate_id_vars if c in df.columns]
     for need in ["XGroup","HueGroup","filename"]:
@@ -1590,12 +1577,36 @@ def _posthoc_pairs_anova(dfm, pair_list, x_label, hue_label):
     return " | ".join(lines) if lines else "n/a"
 
 
-def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=None):
+
+def build_stats_table(long_df, ordered_x, root_path, mode = "ref", hemicatch = True, assay = None, ref_group=None, pair_list=None):
+    """
+    Arguments:
+        long_df : Dataframe
+            metled dataframe in a long format
+        ordered : List
+            List of genotypes that will be tested against eachother
+    """
+
+    status.step("Building Stats Table")
+
+    
+    # Create the directory that will be writen to
+    out_dir = Path(root_path, "stats_table")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # get metric columns
+    metric_cols = get_cols(assay, "metric", status)
+
+    # get the groupings for which stats will be conducted
+    sel_x = ordered_x
+
+    
     x_label_name = _grouping_label("X")
     hue_label_name = _grouping_label("Hue")
 
+    ### run the stats ###
     rows = []
-    for metric in metrics:
+    for metric in metric_cols:
         dfm = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))].copy()
         dfm = dfm.dropna(subset=["value"])
         if dfm.empty:
@@ -1651,7 +1662,37 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
             "Post hoc results": posthoc_res,
         })
 
-    return pd.DataFrame(rows)
+    # change list to dataframe
+    stats_df = pd.DataFrame(rows)
+    
+    ### Prepare to write ###
+    # Grab example row
+    example = long_df.iloc[0]
+
+    # Grab the strain number
+    strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "NA"))
+    try:
+        strain_num = f"{int(strain_num_raw):03d}"
+    except Exception:
+        strain_num = str(strain_num_raw).zfill(3)
+
+    # grab the task name
+    task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
+
+    # grab the strain name
+    strain_name = str(example.get("Gene", example.get("Strain", "NA"))).replace(" ", "_")
+
+    # pull the name together
+    fname = f"{strain_name}_{strain_num}_{task_name}_stats_table.csv"
+    out_path = out_dir / fname
+    
+    # write stats table
+    stats_df.to_csv(out_path, index=False)
+
+    ### Return ###
+    status.ok("Stats table built")
+
+    return stats_df
 
 
 

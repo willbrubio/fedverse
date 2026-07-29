@@ -933,11 +933,11 @@ class FRResult:
     a dozen values — attributes are self-documenting and order-independent."""
     fed_list: list
     key_df2: object
-    saved_paths_indv: list
     fm_md: object          # essentailly the L3, bandit metrics and metadata
     fm_long: object        # melted version og bm_md
     l3_path: Path
     barplot_paths: list
+    stats_df: object
     l4_path: Path
 
 
@@ -1003,8 +1003,14 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None
     # plot the metrics
     barplot_paths = core._run_plots(fm_long, x_checks, x_colors, ordered_x, root_path)
 
-    # ------ Plot the inter-pellet interval ------ #
+    # --- Plot the inter-pellet interval --- #
     interpellet_path = plot_interpellet_interval(fed_list, mapped_df, fm_md, x_colors, root_path)
+
+    # --- Build the stats table --- #
+    stats_df = core.build_stats_table(fm_long, ordered_x, root_path, assay="fr1")
 
     # ------ Assemble the L4 composite figure ------ #
     l4_path = assemble_fr_l4(fm_long, x_colors, fm_md, root_path, fed_list, mapped_df)
+
+    ### Return the frclass ###
+    return FRResult(fed_list, key_df2, fm_md, fm_long, fm_l3, barplot_paths, stats_df, l4_path)
