@@ -11,8 +11,8 @@ an earlier build, and a version once on PyPI can only be yanked, not replaced.
     python -m pip install --upgrade build twine
     Remove-Item dist\* -Force -ErrorAction SilentlyContinue
     python -m build                 # -> dist/fedverse-<ver>.tar.gz + .whl
-    python -m twine check dist\fedverse-<ver>*
-    python -m twine upload --skip-existing dist\fedverse-<ver>*
+    python -m twine check dist\fedverse-0.0.3*
+    python -m twine upload --skip-existing dist\fedverse-0.0.3*
 """
 
 from pathlib import Path
@@ -40,7 +40,7 @@ INSTALL_REQUIRES = [
 
 setup(
     name="fedverse",
-    version="0.0.2",
+    version="0.0.3",
     description="FED3 multi-assay analysis pipeline (SSPsyGene)",
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
