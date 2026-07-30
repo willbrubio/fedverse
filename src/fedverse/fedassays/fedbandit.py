@@ -1387,7 +1387,18 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
             save resolution passed through to assemble_l4.
 
     """
-    root_path = Path(root_path)
+    # =========================================================
+    # Output directories
+    # =========================================================
+
+    l3_dir = root_path / "L3"
+    l4_dir = root_path / "L4"
+    graph_dir = root_path / "Working data and graphs"
+
+    # Create them if they do not already exist
+    l3_dir.mkdir(parents=True, exist_ok=True)
+    l4_dir.mkdir(parents=True, exist_ok=True)
+    graph_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Ingest + key  ---
     fed_list, loaded_files, session_types = core.ingest_l1(l1_path)
@@ -1395,14 +1406,16 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
     key_df2 = core.build_or_rematch_key_df(loaded_files, session_types, key_df,
                                            msg_hint=f"Key status: {msg}")
 
-    # --- Individual plots + metrics -> L3 ---
     metadata_df = clean_key_filename_column(key_df2)
-    _plot_file_core(fed_list, metadata_df, root_path)
-    meta_cols, md = core.build_metakey(metadata_df, assay = "bandit")
+
+    # Individual graphs go into Working data and graphs
+    _plot_file_core(fed_list, metadata_df, graph_dir,)
+    meta_cols, md = core.build_metakey(metadata_df, assay="bandit",)
     id_col, other_id = core.pick_match_method(md)
-    bm = compute_bandit_metrics(fed_list, md, id_col)
-    bm_md = core.attach_meta(bm, md, id_col)
-    l3_path = core.output_l3(bm_md, id_col, other_id, meta_cols, root_path, assay="bandit")
+    bm = compute_bandit_metrics(fed_list, md, id_col,)
+    bm_md = core.attach_meta(bm, md, id_col,)
+    # L3 file goes into the L3 folder
+    l3_path = core.output_l3(bm_md,id_col,other_id, meta_cols, l3_dir, assay="bandit",)
 
 
     # --- Barplots ---
@@ -1414,19 +1427,19 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
     x_checks, x_colors, ordered_x = core.define_aesthetics(bm_long)
     if colors is not None:
         x_colors = colors
-    barplot_paths = core._run_plots(bm_long, x_checks, x_colors, ordered_x, root_path)
+    barplot_paths = core._run_plots(bm_long, x_checks, x_colors, ordered_x, graph_dir,)
 
     # --- Peak accuracy + L4 composite + stats table ---
     basenames, xgroups = prep_pa_groups(mapped_df)
     rev_df = build_rev_df(fed_list, xgroups, basenames)
-    #plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path)
+    #plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, graph_dir,)
 
     # --- stats table --- #
-    stats_df = core.build_stats_table(bm_long, ordered_x, root_path, assay="bandit")
+    stats_df = core.build_stats_table(bm_long, ordered_x, l4_dir, assay="bandit")
 
     # --- L4 --- #
     l4_path = assemble_bandit_l4(bm_long, rev_df, x_colors, ordered_x, bm_md,
-                          root_path, fed_list, metadata_df, bandittype = bandittype, dpi=dpi)
+                          l4_dir, fed_list, metadata_df, bandittype = bandittype, dpi=dpi)
 
     return BanditResult(fed_list, metadata_df, bm_md, bm_long, rev_df,
                         l3_path, barplot_paths, stats_df, l4_path)
