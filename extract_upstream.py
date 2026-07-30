@@ -264,7 +264,7 @@ def emit_module(out_path: Path, ordered_syms, ordered_consts,
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="src/fedlib/extracted", help="target extracted/ folder")
+    ap.add_argument("--out", default="src/fedverse/extracted", help="target extracted/ folder")
     ap.add_argument("--venv", default=".extract_venv", help="isolated venv path")
     ap.add_argument("--skip-install", action="store_true")
     ap.add_argument("--follow-cross-module", action="store_true",

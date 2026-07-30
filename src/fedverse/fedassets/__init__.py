@@ -1,15 +1,15 @@
-"""Bundled image assets for fedlib figures (schematics, logos).
+"""Bundled image assets for fedverse figures (schematics, logos).
 
 Resolve assets by filename instead of hardcoding absolute paths:
 
-    from fedlib import assets
+    from fedverse import assets
     assemble_l4(..., schematic_path=assets.get("fr1_schematic.jpg"))
 """
 from importlib.resources import files
 
-# Traversable handle to THIS subpackage's folder (fedlib/assets).
-# __name__ is "fedlib.assets" on import, so this resolves correctly whether
-# fedlib is installed editable, installed normally, or run from source.
+# Traversable handle to THIS subpackage's folder (fedverse/assets).
+# __name__ is "fedverse.assets" on import, so this resolves correctly whether
+# fedverse is installed editable, installed normally, or run from source.
 _ASSET_DIR = files(__name__)
 
 # Extensions we treat as image assets — used only to build the error list below.
@@ -36,6 +36,6 @@ def get(name: str):
             if p.name.lower().endswith(_IMAGE_EXTS)
         ]
         raise FileNotFoundError(
-            f"asset {name!r} not found in fedlib.assets. Available: {available}"
+            f"asset {name!r} not found in fedverse.assets. Available: {available}"
         )
     return path

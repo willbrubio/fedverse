@@ -25,8 +25,8 @@ from statsmodels.formula.api import ols
 import statsmodels.api as sm
 
 # call cousins
-from fedlib.extracted import fed3_loading
-from fedlib.fedutils.fedlog import status 
+from fedverse.extracted import fed3_loading
+from fedverse.fedutils.fedlog import status 
 
 
 #@@@@@@@@@@@@@@@@@@ GLOBAL VARIABLES @@@@@@@@@@@@@@@@@@#
@@ -36,7 +36,21 @@ from fedlib.fedutils.fedlog import status
 # Set the alpha for plots
 ALPHA = 0.6  # apply to both bars and dots
 
-### ---- create a set of cuntions to validate the assay argument within core calls --- ###
+
+def set_plot_style(font_family="DejaVu Sans"):
+    """
+    Force one consistent font family across every text element (tick labels,
+    axis labels, captions, titles) so the L4 composites all render in the same
+    typeface.
+    """
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = [
+        font_family, "DejaVu Sans", "Liberation Sans", "sans-serif",
+    ]
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
+
+### ---- create a set of functions to validate the assay argument within core calls --- ###
 
 # Single source of truth for every per-assay column set.
 # Structure: assay -> kind -> columns. Keeping meta and metric side by side
@@ -69,11 +83,18 @@ ASSAY_COLS = {
     },
     "fr1": {
         "meta": [
-            # Fill in fr1 meta cols
+            "Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", 
+            "Condition", "Task"
         ],
         "metric": [
-            # fill in real fr1 metrics
-        ],
+            "Pellets", "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy",
+            "PokesPerPellet", "RetrievalTime", "InterPelletInterval", "PokeTime",
+            "%MealPellets", "%GrazingPellets", "NumMeals", "AvgMealSize",
+            "AvgMealDuration", "RecordingHours", "MealsPerHour",
+            "Daily_Pellets", "Left Poke with Pellet","Within_meal_pellet_rate",
+            "%MealPellets_Day","%GrazingPellets_Day","Pellets_Day","NumMeals_Day","AvgMealSize_Day","AvgMealDuration_Day","MealsPerHour_Day","Accuracy_Day",
+            "%MealPellets_Night","%GrazingPellets_Night","Pellets_Night","NumMeals_Night","AvgMealSize_Night","AvgMealDuration_Night","MealsPerHour_Night","Accuracy_Night",
+        ]
     },
 }
 
@@ -90,7 +111,7 @@ def get_cols(assay, kind, status):
         # Insurance in case status.fail() is ever changed to not raise.
         raise ValueError(f"assay={assay!r} not in {allowed}")
 
-    # Internal validation: a bad `kind` is a bug in fedlib, not user input —
+    # Internal validation: a bad `kind` is a bug in fedverse, not user input —
     # so raise KeyError-style rather than routing it through status.fail.
     if kind not in ASSAY_COLS[assay]:
         raise KeyError(
@@ -190,6 +211,27 @@ def with_session_suffix_for_csv(df, metrics, session_col="_Session_type_for_csv"
     return df.drop(columns=[session_col])
 
 
+def _safe_col(df, candidates):
+    """
+    Called by:
+        _prep_events
+        _pellet_times_from_df : fr1
+    """
+    norm = lambda s: str(s).strip().lower().replace('-', '_').replace(' ', '_')
+    lmap = {norm(c): c for c in df.columns}
+    for cand in candidates:
+        key = norm(cand)
+        if key in lmap:
+            return lmap[key]
+    return None
+
+def _prep_events(df):
+    ev_col = _safe_col(df, ["Event", "event"])
+    if ev_col is None:
+        return df.iloc[0:0].copy(), None
+    return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
+
+
 ### ------ Attach metadata to metrics ------ ###
 def attach_meta(metric_df, md, id_col):
     """
@@ -209,6 +251,10 @@ def attach_meta(metric_df, md, id_col):
 
     status.step("Attaching metadata to metrics")
     df = metric_df.copy()
+
+    # catch instances where the filename column may be "File" instead of "filename"
+    if "File" in df.columns:
+        df["filename"] = df["File"].astype(str).map(_basename)
 
 
     if "filename" in md.columns and "Mouse_ID" in md.columns:
@@ -231,6 +277,7 @@ def attach_meta(metric_df, md, id_col):
                     if len(best) == 1:
                         df.at[i, "Mouse_ID"] = best[0]
 
+    # check if the id_col is mouse_id and if both dataframes have a mouse_id column and if the mouse_id column in the metric dataframe has any non-null values
     if (id_col == "Mouse_ID") and ("Mouse_ID" in df.columns) and ("Mouse_ID" in md.columns) and df["Mouse_ID"].notna().any():
         md_unique = md.drop_duplicates(subset=["Mouse_ID"], keep="first")
         df_md = df.merge(md_unique, on="Mouse_ID", how="left", suffixes=("", "_md"))
@@ -242,6 +289,7 @@ def attach_meta(metric_df, md, id_col):
 
     status.ok("metadata attached")
     status.preview(df_md, msg="merged metric dataframe")
+
     return df_md
 
 
@@ -557,7 +605,7 @@ def build_or_rematch_key_df(loaded_files, session_types, key_df = None, msg_hint
         #with status_box:
         #clear_output(wait=True)
         status.sub("Key status: No key provided; showing bare-bones Key_Df.")
-        return
+        return Key_Df
 
     # Identify key capabilities
     scan = _scan_key_columns(key_df)
@@ -762,28 +810,15 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
 
     # prepare the L3 Directory for population
     status.sub("Creating L3 directory")
+
     out_dir = Path(root_path, "L3")
     out_dir.mkdir(parents=True, exist_ok=True)
+
     status.ok("L3 directory created")
 
     df = df_md.copy()
 
-    # determine which assay and metric columns to return
-    #if assay == "bandit":
-    #    metric_cols = [
-    #        "Win-stay", "Lose-shift", "PeakAccuracy", "Total_pellets", "Total_pokes",
-    #        "PokesPerPellet", "RetrievalTime", "PokeTime", "Daily_Pellets",
-    #        "Inactive_Pokes", "Active_Pokes", "Weight",
-    #        "Win-stay_Day", "Win-stay_Night", "Lose-shift_Day", "Lose-shift_Night",
-    #        "PeakAccuracy_Day", "PeakAccuracy_Night","Left Poke with Pellet","Right_Poke",]
-    #elif assay == "pr":
-    #    metric_cols = [
-    #       "Left_Poke", "Right_Poke", "Total_Pokes", "Accuracy", "PokesPerPellet",
-    #        "MedianBreakPoint", "Numberofblocks", "Daily_Pellets",
-    #        "Demand_Q0_raw", "Demand_alpha_raw", "Demand_beta_raw",
-    #        "Demand_alpha_FR", "Demand_beta_FR",]
-    #else:
-    #    status.fail("Argument 'assay' needs to be supplied with one of the following: 'bandit', 'pr1', or 'fr1'.")
+    # get metric columns based on assay type
     metric_cols = get_cols(assay, "metric", status)
 
     # check for agreement between columns in metric file and columns specified
@@ -868,7 +903,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
 
 def _norm_val(x):
     """
-    Called in:
+    Called by:
         _build_group_row
     """
     s = str(x).strip()
@@ -878,7 +913,7 @@ def _norm_val(x):
 
 def _build_group_row(row, ordered_cols):
     """
-    Called in:
+    Called by:
         build_mapping
     """
     if not ordered_cols:
@@ -887,7 +922,7 @@ def _build_group_row(row, ordered_cols):
 
 def _build_file_column(df):
     """
-    Called in:
+    Called by:
         build_mapping
     """
     if "filename" in df.columns:
@@ -1078,7 +1113,8 @@ def melt_metric(df_l3, x_group = "Genotype", hue_group = "Sex", assay = None):
     if not metric_cols:
         raise RuntimeError("No numeric metric columns found among expected Bandit metrics.")
 
-    candidate_id_vars = ["Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
+    candidate_id_vars = ["Gene", "Gene_ID", "Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
+
     id_vars = [c for c in candidate_id_vars if c in df.columns]
     for need in ["XGroup","HueGroup","filename"]:
         if need not in id_vars: id_vars.append(need)
@@ -1540,13 +1576,50 @@ def _posthoc_pairs_anova(dfm, pair_list, x_label, hue_label):
             lines.append(f"{a} vs {b}: p={_fmt_p_num(res['p_x'])} {_p_to_stars(res['p_x'])}")
     return " | ".join(lines) if lines else "n/a"
 
+def _fmt_eta_p2(value):
+    """
+    Format partial eta squared to three decimal places.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
 
-def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=None):
+    if not np.isfinite(value):
+        return "n/a"
+
+    return f"{value:.3f}"
+
+
+def build_stats_table(long_df, ordered_x, root_path, mode = "ref", hemicatch = True, assay = None, ref_group=None, pair_list=None):
+    """
+    Arguments:
+        long_df : Dataframe
+            metled dataframe in a long format
+        ordered : List
+            List of genotypes that will be tested against eachother
+    """
+
+    status.step("Building Stats Table")
+
+    
+    # Create the directory that will be writen to
+    out_dir = Path(root_path, "stats_table")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # get metric columns
+    metric_cols = get_cols(assay, "metric", status)
+
+    # get the groupings for which stats will be conducted
+    sel_x = ordered_x
+
+    
     x_label_name = _grouping_label("X")
     hue_label_name = _grouping_label("Hue")
 
+    ### run the stats ###
     rows = []
-    for metric in metrics:
+    for metric in metric_cols:
         dfm = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))].copy()
         dfm = dfm.dropna(subset=["value"])
         if dfm.empty:
@@ -1562,7 +1635,9 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
                 "Subjects": subjects,
                 "F value interaction": "n/a",
                 "p value interaction": "n/a",
+                "Partial eta squared interaction": "n/a",
                 "Main effects": stats.get("err", "unknown error"),
+                "Partial eta squared main effects": "n/a",
                 "Post hoc test": "n/a",
                 "Post hoc results": "n/a",
             })
@@ -1575,14 +1650,34 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
                 f"{hue_label_name}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}, "
                 f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
             )
+            main_effect_sizes = (
+                f"{x_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}; "
+                f"{hue_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_h'])}"
+            )
+
             f_int = _fmt_F(stats["df_int_num"], stats["df_int_den"], stats["F_int"])
             p_int = _fmt_p_num(stats["p_int"]) + (f" {_p_to_stars(stats['p_int'])}" if np.isfinite(stats["p_int"]) else "")
+
+            if np.isfinite(stats["p_int"]):
+                stars = _p_to_stars(stats["p_int"])
+                if stars:
+                    p_int += f" {stars}" 
+            eta_p_int = _fmt_eta_p2(
+                stats["eta_p_int"]
+            )
         else:
             main_effects = (
                 f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
                 f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
             )
-            f_int, p_int = "n/a", "n/a"
+            #f_int, p_int = "n/a", "n/a"
+            main_effect_sizes = (
+                f"{x_label_name}: "
+                f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}"
+            )
+            f_int, p_int, eta_p_int = "n/a", "n/a", "n/a"
 
         if mode == "ref":
             posthoc_test = "Unpaired t-tests vs reference"
@@ -1597,12 +1692,44 @@ def build_stats_table(long_df, metrics, sel_x, mode, ref_group=None, pair_list=N
             "Subjects": subjects,
             "F value interaction": f_int,
             "p value interaction": p_int,
+            "Partial eta squared interaction": eta_p_int,
             "Main effects": main_effects,
+            "Partial eta squared main effects": main_effect_sizes,
             "Post hoc test": posthoc_test,
             "Post hoc results": posthoc_res,
         })
 
-    return pd.DataFrame(rows)
+    # change list to dataframe
+    stats_df = pd.DataFrame(rows)
+    
+    ### Prepare to write ###
+    # Grab example row
+    example = long_df.iloc[0]
+
+    # Grab the strain number
+    strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "NA"))
+    try:
+        strain_num = f"{int(strain_num_raw):03d}"
+    except Exception:
+        strain_num = str(strain_num_raw).zfill(3)
+
+    # grab the task name
+    task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
+
+    # grab the strain name
+    strain_name = str(example.get("Gene", example.get("Strain", "NA"))).replace(" ", "_")
+
+    # pull the name together
+    fname = f"{strain_name}_{strain_num}_{task_name}_stats_table.csv"
+    out_path = out_dir / fname
+    
+    # write stats table
+    stats_df.to_csv(out_path, index=False)
+
+    ### Return ###
+    status.ok("Stats table built")
+
+    return stats_df
 
 
 
@@ -2028,6 +2155,3 @@ def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
     """
     ax.text(dx, dy, letter, transform=ax.transAxes,
             ha="right", va="bottom", fontsize=fontsize, fontweight="bold")
-
-def _test_function(args):
-    print(f"This is a test function to verify that the code is running correctly.{args}")

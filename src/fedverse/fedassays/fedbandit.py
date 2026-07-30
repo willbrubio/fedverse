@@ -25,10 +25,10 @@ from statsmodels.formula.api import ols
 import statsmodels.api as sm
 
 # import cousins
-from fedlib.fedutils.fedlog import status 
-from fedlib.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
-from fedlib import fedassets
-from fedlib.fedcore import core
+from fedverse.fedutils.fedlog import status 
+from fedverse.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
+from fedverse import fedassets
+from fedverse.fedcore import core
 
 
 
@@ -227,21 +227,7 @@ def _file_base_lower(pathlike):
     return os.path.splitext(os.path.basename(str(pathlike)))[0].lower()
 
 
-def _safe_col(df, candidates):
-    norm = lambda s: str(s).strip().lower().replace('-', '_').replace(' ', '_')
-    lmap = {norm(c): c for c in df.columns}
-    for cand in candidates:
-        key = norm(cand)
-        if key in lmap:
-            return lmap[key]
-    return None
 
-
-def _prep_events(df):
-    ev_col = _safe_col(df, ["Event", "event"])
-    if ev_col is None:
-        return df.iloc[0:0].copy(), None
-    return df[df[ev_col].isin(["Left", "Right", "Pellet"])].copy(), ev_col
 
 
 def _split_day_night(df, ts_col="MM:DD:YYYY hh:mm:ss"):
@@ -366,7 +352,7 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
     for idx in tqdm.tqdm(range(len(fed_list))):
         c_df = fed_list[idx]
         file_name = core._basename(getattr(c_df, "name", f"File_{idx}"))
-        d, ev = _prep_events(c_df)
+        d, ev = core._prep_events(c_df)
 
 
         if ev is None or d.empty:
@@ -444,29 +430,9 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
         raise SystemExit
     
     status.ok("metrics computed:")
-    status.preview(Banditmetrics, msg="metadata key after build_bandit_metakey")
+    status.preview(Banditmetrics, msg="Bandit metrics preview:")
 
     return Banditmetrics
-
-
-
-
-
-
-
-
-
-#@@@@@@@@@@@@@@@@@@ Bandit Plot Groups @@@@@@@@@@@@@@@@@@#
-
-
-### ------ Plotting Helper functions ------ ###
-
-
-
-
-### ------ PLOT METRICS ------ ###
-
-
 
 
 
@@ -777,15 +743,17 @@ def _rev_learning_core(rev_df, ax, palette_map, group_order):
 
 def find_contrast_pair(df, pellet_tol=15, min_sessions=1, wt_label="WT", het_label="Het"):
     """
-    Find one WT mouse and one Het mouse with SIMILAR total pellets but a LARGE gap
-    in PeakAccuracy — i.e. a clean "same reward earned, different task performance"
-    contrast, the kind of example pair you'd want to highlight in a figure.
+    Find one WT mouse and one Het mouse that are each REPRESENTATIVE of their own
+    genotype — their PeakAccuracy sits close to their group's mean — while also
+    earning SIMILAR total pellets and being backed by a meaningful number of
+    sessions. This is the "typical animal from each group" pair you'd want to show
+    as an example figure, rather than a cherry-picked extreme.
 
     Returns (best_pair_row, full_ranked_table).
     """
 
     # --- 1. Collapse sessions -> one representative row per mouse ---
-    # Every filename is a single session, so we average within a mouse 
+    # Every filename is a single session, so we average within a mouse
     per_mouse = (
         df.groupby("Mouse_ID")
         .agg(
@@ -797,29 +765,50 @@ def find_contrast_pair(df, pellet_tol=15, min_sessions=1, wt_label="WT", het_lab
         .reset_index()
     )
 
-    # Drop mice with too few sessions for the mean to be meaningful.
-    per_mouse = per_mouse[per_mouse["n_sessions"] >= min_sessions]
-
-    # --- 2. Split by genotype, normalizing case so "Het"/"HET"/"het" all match ---
-    geno = per_mouse["Genotype"].str.upper()
-    wt = per_mouse[geno == wt_label.upper()].copy()
-    het = per_mouse[geno == het_label.upper()].copy()
-
     # Fail loudly (with the actual labels present) rather than returning nonsense.
+    def _split(pm):
+        g = pm["Genotype"].str.upper()
+        return pm[g == wt_label.upper()].copy(), pm[g == het_label.upper()].copy()
+
+    # --- 2. Prefer well-sampled mice, but don't empty the table on single-session data ---
+    # Apply the session floor; if it wipes out either genotype (e.g. every mouse has
+    # just one session at this stage), relax it so the function still returns a pair.
+    kept = per_mouse[per_mouse["n_sessions"] >= min_sessions]
+    wt, het = _split(kept)
+    if wt.empty or het.empty:
+        print(f"[warn] min_sessions={min_sessions} left {len(wt)} WT / {len(het)} Het; "
+              f"ignoring the session floor for this dataset.")
+        wt, het = _split(per_mouse)
+
+    # Split by genotype, normalizing case so "Het"/"HET"/"het" all match.
     if wt.empty or het.empty:
         raise ValueError(
             f"Need both genotypes. Found {len(wt)} WT and {len(het)} Het. "
             f"Genotype values present: {sorted(per_mouse['Genotype'].unique())}"
         )
 
-    # --- 3. Build every WT x Het candidate pair ---
+    # --- 3. Group-mean accuracy = the target each representative mouse should sit near ---
+    # Computed over the session-averaged, session-count-filtered mice so it matches the
+    # population we're actually selecting from.
+    wt_mean_acc = wt["PeakAccuracy"].mean()
+    het_mean_acc = het["PeakAccuracy"].mean()
+
+    # How far each mouse's accuracy is from its own group's mean (smaller = more typical).
+    wt["acc_dist"] = (wt["PeakAccuracy"] - wt_mean_acc).abs()
+    het["acc_dist"] = (het["PeakAccuracy"] - het_mean_acc).abs()
+
+    # --- 4. Build every WT x Het candidate pair ---
     # Cross join is fine here: this is mice-by-mice, not sessions, so the table is small.
     pairs = wt.merge(het, how="cross", suffixes=("_WT", "_HET"))
 
-    # --- 4. Score each pair ---
-    # pellet_gap -> want SMALL (similar reward);  acc_gap -> want LARGE (different performance).
+    # --- 5. Score each pair ---
+    # pellet_gap    -> want SMALL (similar reward earned).
+    # acc_gap       -> reported for context (the group difference this pair illustrates).
+    # rep_score     -> want SMALL: how far BOTH mice sit from their respective group means,
+    #                  i.e. how representative the pair is of the two genotypes.
     pairs["pellet_gap"] = (pairs["Total_pellets_WT"] - pairs["Total_pellets_HET"]).abs()
     pairs["acc_gap"] = (pairs["PeakAccuracy_WT"] - pairs["PeakAccuracy_HET"]).abs()
+    pairs["rep_score"] = pairs["acc_dist_WT"] + pairs["acc_dist_HET"]
 
     # Keep only pairs whose pellet totals are actually close.
     similar = pairs[pairs["pellet_gap"] <= pellet_tol].copy()
@@ -830,14 +819,15 @@ def find_contrast_pair(df, pellet_tol=15, min_sessions=1, wt_label="WT", het_lab
         print(f"[warn] No pairs within pellet_tol={pellet_tol}; showing closest-pellet pairs instead.")
         similar = pairs.nsmallest(20, "pellet_gap").copy()
 
-    # Among pellet-matched pairs, the best contrast is simply the largest accuracy gap.
-    ranked = similar.sort_values("acc_gap", ascending=False).reset_index(drop=True)
+    # Among pellet-matched pairs, the best example is the one where both mice are most
+    # typical of their group (smallest combined distance to the group means).
+    ranked = similar.sort_values("rep_score", ascending=True).reset_index(drop=True)
 
-    # --- 5. Convenience: pull out the single best pair ---
+    # --- 6. Convenience: pull out the single best pair ---
     cols = [
-        "Mouse_ID_WT", "PeakAccuracy_WT", "Total_pellets_WT",
-        "Mouse_ID_HET", "PeakAccuracy_HET", "Total_pellets_HET",
-        "pellet_gap", "acc_gap",
+        "Mouse_ID_WT", "PeakAccuracy_WT", "Total_pellets_WT", "n_sessions_WT", "acc_dist_WT",
+        "Mouse_ID_HET", "PeakAccuracy_HET", "Total_pellets_HET", "n_sessions_HET", "acc_dist_HET",
+        "pellet_gap", "acc_gap", "rep_score",
     ]
     return ranked.loc[0, cols], ranked[cols]
 
@@ -1090,8 +1080,9 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     # Gene name that replaces the generic "HET" label throughout the figure.
     genename = bm_md["Gene"][0]
 
-    # --- Pick the two example mice: similar reward, different performance ---
-    best, ranked = find_contrast_pair(bm_md, pellet_tol=15)
+    # --- Pick the two example mice: each representative of its genotype, similar reward ---
+    best, ranked = find_contrast_pair(bm_md, pellet_tol=50)
+
     wt_id = str(best["Mouse_ID_WT"])
     het_id = str(best["Mouse_ID_HET"])
     status.ok(f"L4 example pair -> WT: {wt_id} | {genename}: {het_id} "
@@ -1173,24 +1164,23 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     # ---------------- Figure + grid layout ----------------
-    # Row 0: panel A. 
+    # Row 0: panel A.
     # Row 1: line plot (wide) + four equal-width bar plots.
+    core.set_plot_style()   # one shared font family across every L4 figure
     fig = plt.figure(figsize=(16, 8))
-    gs = fig.add_gridspec(
-        nrows=2, ncols=5,
-        height_ratios=[1.0, 1.4],
-        width_ratios=[3, 1, 1, 1, 1],
-        hspace=0.35, wspace=0.45,
-    )
+    #create a grid space
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
 
+    # define the subgridspecs for the top and bottom rows
+    gs_top = gs[0, :].subgridspec(2, 3, width_ratios=[1, 2, 0.3], hspace=0.25, wspace=0.08)
+    gs_bot = gs[1, :].subgridspec(1, 5, width_ratios=[1.88, 1, 1, 1, 1], wspace=0.45)
+    # bar column ratio should be
+    # a total of 1/7 (0.14) + 0.45 wspace
 
     ##### Panel A  #####
     # schematic (left) + two stacked example traces (right)
     # Nested grid so the top row can hold both the image and the two traces.
-    gs_a = gs[0, :].subgridspec(
-        2, 3, 
-        width_ratios=[1, 2, 0.3], 
-        hspace=0.25, wspace=0.08)
+
 
     # Schematic spans both sub-rows on the left; blank if no image supplied.
     # find what bandit version
@@ -1210,14 +1200,14 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         )
 
     # add the bandit schematic
-    ax_schem = fig.add_subplot(gs_a[:, 0])
+    ax_schem = fig.add_subplot(gs_top[:, 0])
     ax_schem.axis("off")
-    core._panel_label(ax_schem, "A)", dx=1.2, dy=1.0)
+    core._panel_label(ax_schem, "A)", dx=0.05, dy=0.75)
 
     if schematic_path is not None and Path(schematic_path).exists():
         ax_schem.imshow(mpimg.imread(str(schematic_path)))
     # add genename label at title
-    ax_schem.set_title(genename, loc="left", fontsize=20, fontweight="bold")
+    ax_schem.set_title(genename, loc="left", fontsize=30, fontweight="bold")
 
 
     ### Switching plots ###
@@ -1237,7 +1227,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     for row, (mid, label, col, show_x) in enumerate(trace_specs):
-        ax_tr = fig.add_subplot(gs_a[row, 1])
+        ax_tr = fig.add_subplot(gs_top[row, 1])
         fed = core._fed_for_mouse(fed_list, metadata_df, mid)
         
         if fed is None:
@@ -1270,7 +1260,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
 
     ##### Panel B-left: reverse-learning line plot #####
-    ax_line = fig.add_subplot(gs[1, 0])
+    ax_line = fig.add_subplot(gs_bot[0, 0])
     core._panel_label(ax_line, "B)")          
     _rev_learning_core(rev_df, ax_line, 
                        palette_map = color_map, 
@@ -1298,17 +1288,17 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
     shared_handles = []
     for col, (metric, ylabel) in enumerate(metric_specs, start=1):
-        ax_bar = fig.add_subplot(gs[1, col])
+        ax_bar = fig.add_subplot(gs_bot[0, col])
         # assign bar plot panels
         if col in bar_panel_letters:
-            _panel_label(ax_bar, bar_panel_letters[col])
+            core._panel_label(ax_bar, bar_panel_letters[col])
         sub = long_df[long_df["variable"] == metric]
         # Guard: a model missing a metric shouldn't crash the whole composite.
         if sub["value"].dropna().empty:
             status.warn(f"L4: no data for {metric}; leaving panel blank.")
             ax_bar.axis("off")
             continue
-        handles = _plot_metric_display(
+        handles = core._plot_metric_display(
             sub, metric, ax_bar, color_map,
             group_order=group_order, hue_order=hue_order, ylabel=ylabel,
             xlabel=(genename if multi else ""),
@@ -1322,7 +1312,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
         fig.legend(
             handles=shared_handles, title="Sex",
             loc="lower right", frameon=False,
-            bbox_to_anchor=(0.95, 0.35),
+            bbox_to_anchor=(0.125, 0.62),
         )
 
     
@@ -1374,6 +1364,7 @@ class BanditResult:
     rev_df: object
     l3_path: Path
     barplot_paths: list
+    stats_df: object
     l4_path: Path
 
 
@@ -1425,12 +1416,17 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
         x_colors = colors
     barplot_paths = core._run_plots(bm_long, x_checks, x_colors, ordered_x, root_path)
 
-    # --- Peak accuracy + L4 composite (cells 8-9) ---
+    # --- Peak accuracy + L4 composite + stats table ---
     basenames, xgroups = prep_pa_groups(mapped_df)
     rev_df = build_rev_df(fed_list, xgroups, basenames)
     #plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path)
+
+    # --- stats table --- #
+    stats_df = core.build_stats_table(bm_long, ordered_x, root_path, assay="bandit")
+
+    # --- L4 --- #
     l4_path = assemble_bandit_l4(bm_long, rev_df, x_colors, ordered_x, bm_md,
                           root_path, fed_list, metadata_df, bandittype = bandittype, dpi=dpi)
 
     return BanditResult(fed_list, metadata_df, bm_md, bm_long, rev_df,
-                        l3_path, barplot_paths, l4_path)
+                        l3_path, barplot_paths, stats_df, l4_path)

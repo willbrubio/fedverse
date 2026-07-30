@@ -8,7 +8,7 @@ logging.basicConfig(
     format="%(message)s",       # We handle our own prefixes; skip logging's default noise
     stream=sys.stderr,
 )
-log = logging.getLogger("fedlib")
+log = logging.getLogger("fedverse")
 
 
 # A tiny helper class instead of scattered print()s.
