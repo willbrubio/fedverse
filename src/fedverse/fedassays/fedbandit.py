@@ -1074,7 +1074,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
     status.step("Assembling L4 composite figure")
 
-    out_dir = Path(root_path, "L4")
+    out_dir = Path(root_path,)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Gene name that replaces the generic "HET" label throughout the figure.
@@ -1397,6 +1397,7 @@ def run_bandit_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=
     l4_dir = root_path / "L4"
     working_dir = root_path / "Working data and graphs"
 
+    # Create them if they do not already exist
     l3_dir.mkdir(parents=True, exist_ok=True)
     l4_dir.mkdir(parents=True, exist_ok=True)
     working_dir.mkdir(parents=True, exist_ok=True)

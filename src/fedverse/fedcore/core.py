@@ -811,7 +811,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
     # prepare the L3 Directory for population
     status.sub("Creating L3 directory")
 
-    out_dir = Path(root_path, "L3")
+    out_dir = Path(root_path,)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     status.ok("L3 directory created")
