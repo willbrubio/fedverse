@@ -1022,7 +1022,9 @@ def _plot_file_core_display(fed_list, metadata_df, root_path, dpi=150,
 
 
 def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
-                fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300):
+                fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300,
+                figsize=(12, 9), h_space = 0.45, font_size=14
+                ):
     """
     Assemble the composite "L4" deliverable figure for one knockout model:
 
@@ -1065,6 +1067,12 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
             that corner is left blank for manual assembly.
         dpi : int
             Save resolution.
+        figsize : tuple
+            Figure width, height in inches.
+        h_space : float
+            Vertical space between the top row and the bottom row.
+        font_size : float
+            Font size for the caption text.
 
     Returns:
         out_path : Path
@@ -1102,9 +1110,12 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     long_df = long_df.copy()
     rev_df = rev_df.copy()
 
-    # Preferred left-to-right order of zygosities after WT, and their pretty form.
-    zygotic_order = ["HET", "HOM", "HEMI"]
-    zyg_display   = {"HET": "Het", "HOM": "Hom", "HEMI": "Hemi"}
+    # --- Relabel zygosities to display form ---
+    # Single mutant   -> bare gene name on the bar.
+    # Multiple mutants -> zygosity on the bar, gene name on the x-axis.
+    zygotic_order = ["HET", "HOM", "HOM/HEMI", "HEMI"]
+    zyg_display   = {"HET": "Het", "HOM": "Hom", "HOM/HEMI": "Hom/Hemi", "HEMI": "Hemi"}
+
 
     present = long_df["XGroup"].dropna().unique().tolist()
     non_wt  = [g for g in present if str(g).upper() != "WT"]
@@ -1167,9 +1178,13 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     # Row 0: panel A.
     # Row 1: line plot (wide) + four equal-width bar plots.
     core.set_plot_style()   # one shared font family across every L4 figure
-    fig = plt.figure(figsize=(16, 8))
+    #fig = plt.figure(figsize=(16, 8))
+    fig_w, fig_h = figsize
+    fig = plt.figure(figsize=(fig_w, fig_h))
+
+
     #create a grid space
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=h_space)
 
     # define the subgridspecs for the top and bottom rows
     gs_top = gs[0, :].subgridspec(2, 3, width_ratios=[1, 2, 0.3], hspace=0.25, wspace=0.08)
@@ -1320,22 +1335,37 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     # --- Caption block beneath the panels ---
     # Assembled line-by-line (each string ends with a space) so the joins never
     # run words together, with explicit \n where a visible line break is wanted.
-    caption = (
-        "A) FED3 device and example behaviour schematic. "
-        "B) Line plot and bar graph of peak accuracy in the 10 trials around a switch.\n"
-        "C, D, E) Bar graphs of mean total pokes, win-stay and lose-shift respectively.\n"
-        "Win-stay: after a reward, did the mouse choose the same port again. "
-        "Lose-shift: after no reward, did it choose the opposite port.\n"
-        "Statistics: two-way ANOVA; the reported p-value is the genotype effect "
-        "(genotype x sex and sex effects are in the stats table)."
+    caption_raw = (
+        "A) FED3 device and example behaviour schematic. B) Line plot and bar graph of peak "
+        "accuracy in the 10 trials around a switch. C, D, E) Bar graphs of mean total pokes, "
+        "win-stay and lose-shift respectively. Win-stay: after a reward, did the mouse choose "
+        "the same port again. Lose-shift: after no reward, did it choose the opposite port. "
+        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x "
+        "sex and sex effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
+
+    caption = core._wrap_caption(caption_raw, fig_w, fontsize=font_size)
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=font_size)
+    
+    # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
+    n_lines = caption.count("\n") + 1
+    
+    # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
+    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
+    
+    # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
+    longest = max((len(str(g)) for g in group_order), default=0)
+    # ~0.011 fig-fraction per char at fontsize 14 on a 9in figure; tune the constant
+    label_depth = longest * 0.011 * (9 / fig_h)
+    
+    fig.subplots_adjust(bottom=cap_frac + label_depth)
 
 
     
 
-    # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.22)
+
+
 
     out_path = out_dir / f"{genename}_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.

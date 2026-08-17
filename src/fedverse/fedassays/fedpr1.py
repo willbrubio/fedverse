@@ -18,6 +18,7 @@ from scipy.stats import sem
 from itertools import cycle
 from IPython.display import display
 
+
 # Import cousins
 from fedverse.fedutils.fedlog import status
 from fedverse.extracted import fed3bandit_extracted, fed3_loading, fed3_fedframe
@@ -520,6 +521,7 @@ def plot_group_mean_demand_with_params(mapping_df, pm_grps_df, md, x_colors,
 
     # ONE figure / axes for all groups
     fig, ax = plt.subplots(figsize=(10, 6))
+    plt.close(fig)
 
     stat_rows = []
     for gi, g in enumerate(groups):
@@ -906,10 +908,18 @@ def _pick_example_fed(long_df, fed_list, metadata_df, *, target_group=None,
     return None, None
 
 
+
+
+
+
+
+
 ### ------ L4 assembly ------- ###
 
 def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
-                   fed_list, metadata_df, *, bandittype=None, schematic_path=None, dpi=300):
+                   fed_list, metadata_df, *, schematic_path=None, dpi=300, 
+                   figsize=(12, 9), h_space = 0.45, font_size=14
+                   ):
     """
     Assemble the composite "L4" deliverable figure for one knockout model on the
     Progressive Ratio (PR1) task, mirroring the published PR figure:
@@ -954,6 +964,12 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
             Override for the panel-A image. Defaults to the packaged pr1 schematic.
         dpi : int
             Save resolution.
+        figsize : tuple
+            Figure width, height in inches.
+        h_space : float
+            Vertical space between the top row and the bottom row.
+        font_size : float
+            Font size for the caption text.
 
     Returns:
         out_path : Path
@@ -1029,11 +1045,17 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     # Row 0: A (schematic) | B (example histogram) | C (demand curve, widest).
     # Row 1: five equal-width bar panels D-H.
     core.set_plot_style()   # one shared font family across every L4 figure
-    fig = plt.figure(figsize=(16, 8))
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
+    #fig = plt.figure(figsize=(16, 8))
+    fig_w, fig_h = figsize
+    fig = plt.figure(figsize=(fig_w, fig_h))
+
+    # --- Gridspec: two rows, top row has 3 panels, bottom row has 5 panels ---
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=h_space)
 
     gs_top = gs[0].subgridspec(1, 3, width_ratios=[1.2, 1.3, 1.8], wspace=0.25)
     gs_bot = gs[1].subgridspec(1, 5, wspace=0.75)
+
+
 
     ##### Panel A: schematic #####
     if schematic_path is None:
@@ -1070,6 +1092,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
         _plot_pr_trace_core(fed_ex, ax_ex, show_xlabel=True)
 
 
+
     ##### Panel C: grouped demand curve #####
     ax_dem = fig.add_subplot(gs_top[0, 2])
     core._panel_label(ax_dem, "C)")
@@ -1081,6 +1104,8 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
             for txt in leg.get_texts():
                 if txt.get_text().upper() != "WT":
                     txt.set_text(f"{genename} {txt.get_text()}")
+
+
 
     ##### Panels D-H: metric bars #####
     # (long_df variable name, y-axis label shown on the panel)
@@ -1119,18 +1144,38 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
             bbox_to_anchor=(0.125, 0.55),
         )
 
+
+
     # --- Caption block beneath the panels ---
-    caption = (
-        "A) FED3 device and PR task schematic. B) Individual mouse histogram: each earned pellet plotted at how many pokes (block depth)\n"
-        "it took to earn it. C) Grouped demand curve showing mean alpha (the price at which consumption halves) and slope of the curve. \n"
-        "D, E, F, G, H) Bar graphs of mean daily pellets, total pokes, median break point, alpha and slope respectively. \n"
-        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex effects are in the stats table)."
+    caption_raw = (
+        "A) FED3 device and PR task schematic. B) Individual mouse histogram: each earned pellet "
+        "lotted at how many pokes (block depth) it took to earn it. C) Grouped demand curve showing "
+        "mean alpha (the price at which consumption halves) and slope of the curve. D, E, F, G, H) "
+        "Bar graphs of mean daily pellets, total pokes, median break point, alpha and slope respectively. "
+        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex "
+        "effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
+
+    caption = core._wrap_caption(caption_raw, fig_w, fontsize=font_size)
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=font_size)
 
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.22)
+    n_lines = caption.count("\n") + 1
 
+    # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
+    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
+
+    # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
+    longest = max((len(str(g)) for g in group_order), default=0)
+    # ~0.011 fig-fraction per char at fontsize 14 on a 9in figure; tune the constant
+    label_depth = longest * 0.011 * (9 / fig_h)
+
+    fig.subplots_adjust(bottom=cap_frac + label_depth)
+
+
+
+    ### --- Save the composite figure --- #
     out_path = out_dir / f"{genename}_PR_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="svg")

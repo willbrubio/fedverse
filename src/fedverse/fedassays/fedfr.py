@@ -690,7 +690,9 @@ def _plot_ipi_density_core(fed_list, ax, mapped_df, palette_map, group_order, *,
 ### ------ L4 assembly ------- ###
 
 def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
-                   fed_list, mapped_df, *, schematic_path=None, dpi=300):
+                   fed_list, mapped_df, *, schematic_path=None, dpi=300,
+                   figsize=(12, 9), h_space = 0.45, font_size=14
+                   ):
     """
     Assemble the composite "L4" deliverable figure for one knockout model on the
     Fixed Ratio (FR1) task, mirroring the published FR figure:
@@ -728,6 +730,12 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
             Override for the panel-A image. Defaults to the packaged fr1 schematic.
         dpi : int
             Save resolution.
+        figsize : tuple
+            Figure width, height in inches.
+        h_space : float
+            Vertical space between the top row and the bottom row.
+        font_size : float
+            Font size for the caption text.
 
     Returns:
         out_path : Path
@@ -736,6 +744,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
 
     status.step("Assembling FR1 L4 composite figure")
 
+    ### --- Prepare output directory, gene name, and relabeling --- ###
     out_dir = Path(root_path, "L4")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -744,15 +753,20 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
 
     long_df = long_df.copy()
 
-    # --- Relabel zygosities to display form (identical convention to the PR L4) ---
+
+
+    # --- Relabel zygosities to display form ---
     # Single mutant   -> bare gene name on the bar.
     # Multiple mutants -> zygosity on the bar, gene name on the x-axis.
-    zygotic_order = ["HET", "HOM", "HEMI"]
-    zyg_display   = {"HET": "Het", "HOM": "Hom", "HEMI": "Hemi"}
+    zygotic_order = ["HET", "HOM", "HOM/HEMI", "HEMI"]
+    zyg_display   = {"HET": "Het", "HOM": "Hom", "HOM/HEMI": "Hom/Hemi", "HEMI": "Hemi"}
 
+    # find all XGroups present in the data (ignore HueGroup)
     present = long_df["XGroup"].dropna().unique().tolist()
-    non_wt  = [g for g in present if str(g).upper() != "WT"]
-    multi   = len(non_wt) > 1
+
+    # Isolate all non-wt group names
+    non_wt = [g for g in present if str(g).upper() != "WT"]
+    multi  = len(non_wt) > 1
 
     if not multi:
         relabel = {g: genename for g in non_wt}
@@ -761,13 +775,19 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
 
     long_df["XGroup"] = long_df["XGroup"].replace(relabel)
 
+
+
     # --- Order: WT first, then mutants by zygotic_order (unknowns sort last) ---
     def _zygo_rank(orig_label):
         up = str(orig_label).upper()
         return zygotic_order.index(up) if up in zygotic_order else len(zygotic_order)
 
+    # conduct the actual ordering of the mutant groups (WT is always first)
     non_wt_sorted = sorted(non_wt, key=_zygo_rank)
     group_order = ["WT"] + [relabel[g] for g in non_wt_sorted]
+
+
+
 
     # --- Resolve colors keyed to the FINAL display labels ---
     # x_colors keys are inconsistent upstream (raw "HOM"/"HEMI" but bare gene for
@@ -808,12 +828,30 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
     # Row 0: A (schematic) + B, C, D, E bars.
     # Row 1: F (IPI density, wide) + G, H bars.
     core.set_plot_style()   # one shared font family across every L4 figure
-    fig = plt.figure(figsize=(16, 8))
-    #gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.5)
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=0.45)
+    #fig = plt.figure(figsize=(16, 8))
+    fig_w, fig_h = figsize
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    
 
+    # Determine head space based on groups and if hemi is present. 
+    #   If hemi is present, we need more space for the legend.
+    #   We also have to adjust the caption at the bottom of the figure
+    if any("HEMI" in str(g).upper() for g in present):
+        print("L4: HEMI present")
+        h_space = 0.80
+        cap_space = 0.29
+    else:
+        h_space = 0.45
+        cap_space = 0.25
+
+    # define the gridspec for the figure
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace=h_space)
+
+    # define the subgridspec for the top and bottom rows
     gs_top = gs[0, :].subgridspec(1, 5, width_ratios=[1.71, 1, 1, 1, 1], wspace=0.5)
     gs_bot = gs[1, :].subgridspec(1, 3, width_ratios=[4.15, 1, 1], wspace=0.45)
+
+
 
     ##### Panel A: schematic #####
     if schematic_path is None:
@@ -880,6 +918,8 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
                 if txt.get_text().upper() != "WT":
                     txt.set_text(f"{genename} {txt.get_text()}")
 
+
+
     ##### Panels G-H: bottom-row metric bars #####
     bot_specs = [
         ("InterPelletInterval", "Within-meal IPI (s)"),
@@ -893,6 +933,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
         if handles and not shared_handles:
             shared_handles = handles
 
+
     # --- One shared Sex legend for the whole figure ---
     if shared_handles:
         fig.legend(
@@ -901,19 +942,46 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
             bbox_to_anchor=(0.125, 0.66),
         )
 
+
     # --- Caption block beneath the panels ---
-    caption = (
-        "A) Schematic of the FED3 device and FR1 task. B, C, D, E) Bar graphs of the mean daily pellets, accuracy, poke time and retrieval\n" 
-        "time respectively. F) Histogram of the distribution of inter-pellet intervals: pellets eaten less than 60 s apart (within a meal)\n"
-        "vs. more than 60 s apart (grazing). G, H) Bar graphs of the mean inter-pellet interval (IPI) within a meal and the percentage of\n"
-        "pellets within a meal.\n"
-        "Statistics: two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex effects are in the stats table)."
+
+    caption_raw = (
+        "A) Schematic of the FED3 device and FR1 task. B, C, D, E) Bar graphs of the mean daily "
+        "pellets, accuracy, poke time and retrieval time respectively. F) Histogram of the "
+        "distribution of inter-pellet intervals: pellets eaten less than 60 s apart (within a "
+        "meal) vs. more than 60s apart (grazing). G, H) Bar graphs of the mean inter-pellet "
+        "interval (IPI) within a meal and the percentage of pellets within a meal. Statistics: "
+        "two-way ANOVA; the reported p-value is the genotype effect (genotype x sex and sex "
+        "effects are in the stats table)."
     )
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=14)
 
+    caption = core._wrap_caption(caption_raw, fig_w, fontsize=font_size)
+    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=font_size)
+    
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
-    fig.subplots_adjust(bottom=0.24)
+    n_lines = caption.count("\n") + 1
+    
+    # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
+    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
+    
+    # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
+    longest = max((len(str(g)) for g in group_order), default=0)
+    # ~0.011 fig-fraction per char at fontsize 14 on a 9in figure; tune the constant
+    label_depth = longest * 0.011 * (9 / fig_h)
+    
+    fig.subplots_adjust(bottom=cap_frac + label_depth)
 
+    """
+    fig.text(0.1, 0.02, caption_12, ha="left", va="bottom", fontsize=14)
+    
+        # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
+        fig.subplots_adjust(bottom=cap_space)
+    
+    """
+    
+
+    ### Save the figure as an SVG for vector graphics and future editing.
     out_path = out_dir / f"{genename}_FR_L4.svg"
     # bbox_inches="tight" keeps the caption and shared legend from being clipped.
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="svg")
