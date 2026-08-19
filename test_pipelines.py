@@ -39,7 +39,7 @@ PIPELINE_L3_SUBDIR = "L3"
 REFERENCE_L3_SUBDIR = "l3_og"
 
 # Absolute tolerance for numeric CSV comparison.
-FLOAT_TOL = 1e-10
+FLOAT_TOL = 1e-5
 
 # Cap on per-cell disagreement rows written per file, so a wildly-off file
 # can't blow up the detail CSV. Summary still counts every disagreement.

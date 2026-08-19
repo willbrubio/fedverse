@@ -1351,7 +1351,7 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     n_lines = caption.count("\n") + 1
     
     # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
-    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    cap_frac = n_lines * font_size * 1.7 / (fig_h * 72)
     print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
     
     # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.

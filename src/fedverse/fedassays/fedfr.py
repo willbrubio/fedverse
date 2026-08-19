@@ -962,7 +962,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
     n_lines = caption.count("\n") + 1
     
     # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
-    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    cap_frac = n_lines * font_size * 1.7 / (fig_h * 72)
     print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
     
     # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
@@ -1011,7 +1011,7 @@ class FRResult:
 
 
 
-def run_fr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None, dpi=300):
+def run_fr_l1_l4(l1_path, key_path, root_path, *,  colors=None, dpi=300):
     """Run the full FR pipeline from an L1 zip to the L4 composite figure.
 
     Orchestration only — every step delegates to the existing public
@@ -1019,8 +1019,6 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None
 
     Args:
         l1_path, key_path, root_path : the three inputs your notebook sets by hand.
-        bandittype; String | None
-            accepts "bandit100" & "bandit80" in order to properly create the schematics.
         colors; optional {group: color} override. If None, falls back to
             define_aesthetics' defaults so the function runs headless (no widget
             interaction required).
@@ -1071,14 +1069,15 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None
     # plot the metrics
     barplot_paths = core._run_plots(fm_long, x_checks, x_colors, ordered_x, root_path)
 
-    # --- Plot the inter-pellet interval --- #
+    # ------ Plot the inter-pellet interval ------ #
     interpellet_path = plot_interpellet_interval(fed_list, mapped_df, fm_md, x_colors, root_path)
 
-    # --- Build the stats table --- #
+    # ------ Build the stats table ------ #
     stats_df = core.build_stats_table(fm_long, ordered_x, root_path, assay="fr1")
 
     # ------ Assemble the L4 composite figure ------ #
     l4_path = assemble_fr_l4(fm_long, x_colors, fm_md, root_path, fed_list, mapped_df)
 
-    ### Return the frclass ###
+
+    ### ------ Return the frclass ------ ###
     return FRResult(fed_list, key_df2, fm_md, fm_long, fm_l3, barplot_paths, stats_df, l4_path)

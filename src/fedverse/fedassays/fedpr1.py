@@ -200,7 +200,7 @@ def breakpoint_and_runs(df):
 
 
 ### ------ Compute PR Metrics ------- ###
-def compute_pr_metrics(fed_list, md, min_runs_per_mice = 5):
+def compute_pr_metrics(fed_list, md, min_runs_per_mice = 9):
     """
     Computes metrics for the PR task.
 
@@ -1163,7 +1163,7 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
     n_lines = caption.count("\n") + 1
 
     # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
-    cap_frac = n_lines * font_size * 1.6 / (fig_h * 72)
+    cap_frac = n_lines * font_size * 1.7 / (fig_h * 72)
     print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
 
     # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
@@ -1205,7 +1205,7 @@ class PRResult:
 
 
 
-def run_pr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None, dpi=300):
+def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     """Run the full PR pipeline from an L1 zip to the L4 composite figure.
 
     Orchestration only — every step delegates to the existing public
@@ -1213,8 +1213,6 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, bandittype = None, colors=None
 
     Args:
         l1_path, key_path, root_path : the three inputs your notebook sets by hand.
-        bandittype; String | None
-            accepts "bandit100" & "bandit80" in order to properly create the schematics.
         colors; optional {group: color} override. If None, falls back to
             define_aesthetics' defaults so the function runs headless (no widget
             interaction required).
