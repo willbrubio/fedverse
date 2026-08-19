@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import re
+import textwrap
 
 # plotting
 import ipywidgets as widgets
@@ -526,9 +527,16 @@ def _collapse_key_suffixes(df, keep_filename_from_base=True):
     df = df.drop(columns=drop_cols, errors='ignore').rename(columns=rename_map)
     return df
     
-def _read_key_from_upload(key_path):
+def _read_key_from_upload(key_path, hom_hemi_merge=True):
     """
     Reads CSV/XLSX bytes from Colab upload.
+
+    Arguments:
+        key_path: String
+            Path to the uploaded key file.
+        hom_hemi_merge: Boolean
+            Whether to merge Hom and Hemi genotypes.
+
     Returns: 
         a Dataframe or None, returns a message.
     """
@@ -575,6 +583,15 @@ def _read_key_from_upload(key_path):
         #globals()['uploaded_key_path'] = fixed_path
 
         status.ok("Done - Key loaded")
+
+        # we catch if there is a hemi and adjust the key_df accordingly 
+        if hom_hemi_merge:
+            if 'hemi' in key_df["Genotype$"].str.lower().unique():
+                status.sub("Can merge Hom and Hemi genotypes into a single category")
+                key_df['Genotype$'] = key_df['Genotype$'].str.replace('Hom|Hemi', 'Hom/Hemi', regex=True)
+            else:
+                status.sub("No Hemi genotypes found in key; no merge needed")
+
         return key_df, f"Key loaded from upload ({name}). {scan['msg']}"
     except Exception as e:
         return None, f"Error reading uploaded key: {e}"
@@ -1198,8 +1215,9 @@ def define_aesthetics(long_df):
     genotype_colors = {
         "WT":   "#7ACAFF",
         "HET":  "#9BDF94",
-        "HOM":  "#D2ACD3",
-        "HEMI": "#FFB193",
+        "HOM/HEMI": "#FFB193",
+        "HOM":      "#FFB193",
+        "HEMI":     "#D2ACD3",
     }
 
     def _default_color(group, idx):
@@ -1576,6 +1594,7 @@ def _posthoc_pairs_anova(dfm, pair_list, x_label, hue_label):
             lines.append(f"{a} vs {b}: p={_fmt_p_num(res['p_x'])} {_p_to_stars(res['p_x'])}")
     return " | ".join(lines) if lines else "n/a"
 
+
 def _fmt_eta_p2(value):
     """
     Format partial eta squared to three decimal places.
@@ -1591,7 +1610,237 @@ def _fmt_eta_p2(value):
     return f"{value:.3f}"
 
 
-def build_stats_table(long_df, ordered_x, root_path, mode = "ref", hemicatch = True, assay = None, ref_group=None, pair_list=None):
+
+
+
+
+
+
+
+
+def build_stats_table(long_df, ordered_x, root_path, mode = "ref", 
+                      assay = None, ref_group=None, pair_list=None):
+    """
+    Arguments:
+        long_df : Dataframe
+            melted dataframe in a long format
+        ordered : List
+            List of genotypes that will be tested against eachother
+        root_path : Path
+            Path to the root directory where the stats table will be saved
+    """
+
+    status.step("Building Stats Table")
+
+    # Create the directory that will be writen to
+    out_dir = Path(root_path, "stats_table")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # get metric columns
+    metric_cols = get_cols(assay, "metric", status)
+
+    # get the groupings for which stats will be conducted
+    sel_x = ordered_x
+
+    
+    ### Define Dictionaries to control tests dome
+    # check for hemi genotypes and warn user that stats will be conducted with hemi groups
+    # we need to conduct post hoc tests to account for hemi groups
+    # and the stats will be divided into two groups by sex to account for the hemi groups
+    # Male: WT x HEMI
+    # Female: WT x HET & WT x HOM
+
+    hemi_match = [geno for geno in sel_x if 'hemi' in geno.lower()]
+    ref = ref_group or "WT"
+
+    affected = "HOM/HEMI"   # merged X-linked group; Sex separates Hom(F) from Hemi(M)
+
+    if hemi_match:
+        status.warn("'hemi' genotype detected: running pooled + sex-split post hocs")
+        test_dict = {
+            "pooled":     {"filter": {},                                           "test_mode": "ref", "ref_grp": ref},
+            "male_hemi":  {"filter": {"HueGroup": "M", "XGroup": [ref, affected]}, "test_mode": "pairs", "ref_grp": ref},
+            "female_hom": {"filter": {"HueGroup": "F", "XGroup": [ref, affected]}, "test_mode": "pairs", "ref_grp": ref},
+            "female_het": {"filter": {"HueGroup": "F", "XGroup": [ref, "HET"]},    "test_mode": "pairs", "ref_grp": ref},
+        }
+    else:
+        test_dict = {
+            "pooled": {"filter": {}, "test": mode, "ref": ref, "pairs": pair_list or []},
+        }
+        
+
+
+
+    ### Information about tests going to be run ###
+    # inform the user which groups are availabel for testing
+    status.ok(f"Stats will be conducted for the following X groups: {sel_x}")
+
+    # Pull our names and hues
+    x_label_name = _grouping_label("X")
+    hue_label_name = _grouping_label("Hue")
+
+
+    # Declare empty rows to write to
+    rows = []
+
+    for key, value in test_dict.items():
+        status.sub(f"Conducting stats for {key}")
+
+        filt = value.get("filter", {})
+        status.ok(f"filter: {filt}")
+        # unpack test
+        ref_group = value.get("ref_grp")
+        status.ok(f"ref_grp: {ref_group}")
+        # unpack ref-mode
+        mode = value.get("test_mode")
+        status.ok(f"Running mode: {mode}")
+
+        # Unpack Pairs
+        xg = filt.get("XGroup")
+        if value.get("pairs"):
+            pairs = value["pairs"]
+        elif isinstance(xg, (list, tuple)) and len(xg) == 2:
+            pairs = [tuple(xg)]                 # e.g. [("WT", "HOM/HEMI")]
+        else:
+            pairs = []
+        status.ok(f"Pair List: {pairs}")
+
+
+        ### Run the stats ###
+        # iterate over dict of dict
+        
+        for metric in metric_cols:
+
+            # Adjust dfm
+            dfm = long_df[(long_df["variable"] == metric) & (long_df["XGroup"].isin(sel_x))].copy()
+
+            # Apply THIS test's filter (empty filter = pooled, no-op).
+            for col, val in filt.items():
+                dfm = dfm[dfm[col].isin(val)] if isinstance(val, (list, tuple, set)) \
+                      else dfm[dfm[col] == val]
+
+
+
+            dfm = dfm.dropna(subset=["value"])
+
+            if dfm.empty:
+                continue
+
+
+
+            stats = _twoway_anova_full(dfm)
+            subjects = _subjects_n_per_group(dfm)
+
+            if not stats.get("ok", False):
+                rows.append({
+                    "Comparison": key,
+                    "Figure": metric,
+                    "Test": "ANOVA failed",
+                    "Subjects": subjects,
+                    "F value interaction": "n/a",
+                    "p value interaction": "n/a",
+                    "Partial eta squared interaction": "n/a",
+                    "Main effects": stats.get("err", "unknown error"),
+                    "Partial eta squared main effects": "n/a",
+                    "Post hoc test": "n/a",
+                    "Post hoc results": "n/a",
+                })
+                continue
+
+            if stats["test"] == "Two-way ANOVA":
+                main_effects = (
+                    f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
+                    f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}; "
+                    f"{hue_label_name}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}, "
+                    f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
+                )
+                main_effect_sizes = (
+                    f"{x_label_name}: "
+                    f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}; "
+                    f"{hue_label_name}: "
+                    f"partial η²={_fmt_eta_p2(stats['eta_p_h'])}"
+                )
+
+                f_int = _fmt_F(stats["df_int_num"], stats["df_int_den"], stats["F_int"])
+                p_int = _fmt_p_num(stats["p_int"]) + (f" {_p_to_stars(stats['p_int'])}" if np.isfinite(stats["p_int"]) else "")
+
+                if np.isfinite(stats["p_int"]):
+                    stars = _p_to_stars(stats["p_int"])
+                    if stars:
+                        p_int += f" {stars}" 
+                eta_p_int = _fmt_eta_p2(
+                    stats["eta_p_int"]
+                )
+            else:
+                main_effects = (
+                    f"{x_label_name}: {_fmt_F(stats['df_x_num'], stats['df_x_den'], stats['F_x'])}, "
+                    f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}"
+                )
+                #f_int, p_int = "n/a", "n/a"
+                main_effect_sizes = (
+                    f"{x_label_name}: "
+                    f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}"
+                )
+                f_int, p_int, eta_p_int = "n/a", "n/a", "n/a"
+
+            if mode == "ref":
+                posthoc_test = "Unpaired t-tests vs reference"
+                posthoc_res  = _posthoc_ref_ttests(dfm, ref_group)
+            else:
+                posthoc_test = "Selected pairwise ANOVA"
+                posthoc_res  = _posthoc_pairs_anova(dfm, pair_list or [], x_label_name, hue_label_name)
+
+            rows.append({
+                "Comparison": key,
+                "Figure": metric,
+                "Test": stats["test"],
+                "Subjects": subjects,
+                "F value interaction": f_int,
+                "p value interaction": p_int,
+                "Partial eta squared interaction": eta_p_int,
+                "Main effects": main_effects,
+                "Partial eta squared main effects": main_effect_sizes,
+                "Post hoc test": posthoc_test,
+                "Post hoc results": posthoc_res,
+            })
+
+    # change list to dataframe
+    stats_df = pd.DataFrame(rows)
+
+
+    
+    ### Prepare to write ###
+    # Grab example row
+    example = long_df.iloc[0]
+
+    # Grab the strain number
+    strain_num_raw = example.get("Gene_ID", example.get("Strain_ID", "NA"))
+    try:
+        strain_num = f"{int(strain_num_raw):03d}"
+    except Exception:
+        strain_num = str(strain_num_raw).zfill(3)
+
+    # grab the task name
+    task_name = str(example.get("Session_type", "Unknown")).replace(" ", "_")
+
+    # grab the strain name
+    strain_name = str(example.get("Gene", example.get("Strain", "NA"))).replace(" ", "_")
+
+    # pull the name together
+    fname = f"{strain_name}_{strain_num}_{task_name}_stats_table.csv"
+    out_path = out_dir / fname
+    
+    # write stats table
+    stats_df.to_csv(out_path, index=False)
+
+    ### Return ###
+    status.ok("Stats table built")
+
+    return stats_df
+
+
+
+def build_stats_table_old(long_df, ordered_x, root_path, mode = "ref", hemicatch = True, assay = None, ref_group=None, pair_list=None):
     """
     Arguments:
         long_df : Dataframe
@@ -1730,6 +1979,7 @@ def build_stats_table(long_df, ordered_x, root_path, mode = "ref", hemicatch = T
     status.ok("Stats table built")
 
     return stats_df
+
 
 
 
@@ -2155,3 +2405,18 @@ def _panel_label(ax, letter, *, dx=-0.08, dy=1.08, fontsize=18):
     """
     ax.text(dx, dy, letter, transform=ax.transAxes,
             ha="right", va="bottom", fontsize=fontsize, fontweight="bold")
+
+def _wrap_caption(text, fig_width_in, *, fontsize=14, left=0.1, right=0.9, char_w=0.5):
+    """
+    Wrap a caption string to fit within the figure width, given a font size for the caption. 
+    This is a rough estimate for the L4 figure captions, which are often long and need to be 
+    wrapped to avoid overflow.
+    
+    Returns: a single string with embedded newlines.
+    """
+    # char_w = mean glyph advance as a fraction of fontsize (pts). ~0.5 is a safe
+    # over-estimate for DejaVu Sans, so lines err narrow rather than overflow.
+    usable_pts = fig_width_in * 72 * (right - left)   # drawable width, 72 pt/in
+    ncols = max(20, int(usable_pts / (char_w * fontsize)))  # char budget per line
+    flat = " ".join(text.split())                     # drop any existing hard breaks
+    return textwrap.fill(flat, width=ncols)
