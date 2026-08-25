@@ -1023,7 +1023,7 @@ def _plot_file_core_display(fed_list, metadata_df, root_path, dpi=150,
 
 def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
                 fed_list, metadata_df, *, bandittype = None, schematic_path=None, dpi=300,
-                figsize=(12, 9), h_space = 0.45, font_size=14
+                figsize=(14, 9), h_space = 0.45, font_size=14
                 ):
     """
     Assemble the composite "L4" deliverable figure for one knockout model:
@@ -1263,13 +1263,13 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
 
             # Add arrow for both plots
             ax_tr.annotate("",
-                    xy=(1.0, -0.2), xytext=(0.15, -0.2),
+                    xy=(1.0, -0.28), xytext=(0.18, -0.28),
                     xycoords="axes fraction",
                     annotation_clip=False,  # don't clip content drawn above the axes
                     arrowprops=dict(arrowstyle="->", lw=5, color="0.6"))
 
             # Label for arrow independently
-            ax_tr.text(0.07, -0.28, "3 days", transform=ax_tr.transAxes,
+            ax_tr.text(0.07, -0.35, "3 days", transform=ax_tr.transAxes,
                        ha="left", va="bottom", color="0.5")
 
 
