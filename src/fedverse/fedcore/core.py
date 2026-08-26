@@ -97,6 +97,19 @@ ASSAY_COLS = {
             "%MealPellets_Night","%GrazingPellets_Night","Pellets_Night","NumMeals_Night","AvgMealSize_Night","AvgMealDuration_Night","MealsPerHour_Night","Accuracy_Night",
         ]
     },
+    "beam": {
+        "meta": [
+            "Genotype", "Gene", "Strain", "Sex", "Diet", "Treatment", 
+            "Condition", "Pellets", "Mutation"
+        ],
+        "activity": [
+            "activity_percent", "Activity_percent", "Activity %", "activity%", "activity", "Activity"
+        ],
+        "metric": [
+            "MESOR_z", "Amplitude_z", "Acrophase_ZT_signed", "Cosinor_R2", "Night_z", "Day_z", "Mean_activity"
+        ]
+
+    },
 }
 
 def get_cols(assay, kind, status):
@@ -363,7 +376,12 @@ def ingest_l1(l1_path):
                     # attempt to populate lists
                     try:
                         session_type = extract_session_type(tmp_path)
-                        df = fed3_loading.load(tmp_path)
+                        # try to open on basic datetime else try beam index
+                        try:
+                            df = fed3_loading.load(tmp_path)
+                        except Exception as e:
+                            df = fed3_loading.load(tmp_path, index_col="datetime")
+
                         df.name = os.path.basename(zi.filename)
                         df.attrs = {"Session_type": session_type}
                         fed_list.append(df)
@@ -381,7 +399,13 @@ def ingest_l1(l1_path):
                 tmp.write(data); tmp_path = tmp.name
             try:
                 session_type = extract_session_type(tmp_path)
-                df = fed3_loading.load(tmp_path)
+
+                # try to open on basic datetime else try beam index
+                try:
+                    df = fed3_loading.load(tmp_path)
+                except Exception:
+                    df = fed3_loading.load(tmp_path, index_col="datetime")
+
                 df.name = os.path.basename(name)
                 df.attrs = {"Session_type": session_type}
                 fed_list.append(df)
@@ -399,6 +423,16 @@ def ingest_l1(l1_path):
             status.warn(err)
     
     status.ok(f"Ingest Complete - Loaded {len(loaded_files)} files. Session types captured for all.")
+
+    # ensure that a datetime column exists
+    for df in fed_list:
+        has_col = 'MM:DD:YYYY hh:mm:ss' in df.columns or 'datetime' in df.columns
+        if not has_col and df.index.name in ('MM:DD:YYYY hh:mm:ss', 'datetime'):
+            df[df.index.name] = df.index
+            df.index.name = None
+
+        has_ts = 'MM:DD:YYYY hh:mm:ss' in df.columns or 'datetime' in df.columns
+        print(f"{df.name}: timestamp column present = {has_ts}")
 
     # return three lists
     return fed_list, loaded_files, session_types
@@ -753,7 +787,7 @@ def _clean_colname(c):
 ### ------ Build clean metakey ------ ### 
 def build_metakey(key_df, assay = None):
     """
-    Crops the metadatakey for the Bandit and PR1 analysis workflow.
+    Crops the metadatakey for the Bandit FR and PR1 analysis workflow.
     Argument:
         key_df; Dataframe
             A dataframe contating meta information of the mice assayed via a FED (bandit) device.
@@ -1128,7 +1162,7 @@ def melt_metric(df_l3, x_group = "Genotype", hue_group = "Sex", assay = None):
                     metric_cols.append(c); break
     seen = set(); metric_cols = [c for c in metric_cols if not (c in seen or seen.add(c))]
     if not metric_cols:
-        raise RuntimeError("No numeric metric columns found among expected Bandit metrics.")
+        raise RuntimeError("No numeric metric columns found among expected metrics.")
 
     candidate_id_vars = ["Gene", "Gene_ID", "Genotype","Sex","Strain","Start_Date","filename","Mouse_ID","Session_type","XGroup","HueGroup"]
 
