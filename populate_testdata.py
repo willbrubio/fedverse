@@ -44,6 +44,7 @@ ASSAY_MAP = {
     "4_Bandit80_20": "bandit80",
     "2_FR1":         "fr1",
     "5_PR":          "pr",
+    "3_BEAM":        "beam"
 }
 
 # Source level folder -> test name.
