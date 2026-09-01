@@ -842,7 +842,7 @@ def build_metakey(key_df, assay = None):
 
 #@@@@@@@@@@@@@@@@@@ OUTPUT L3 @@@@@@@@@@@@@@@@@@#
 
-def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
+def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None, resolve_hom_hemi = True):
     """
     Arguemnts:
         df_md; Dataframe
@@ -854,7 +854,12 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
         meta_cols; List
             list of columns we are interested in outputing to the L3
         assay; str
-            a strong defining what assays L3 should be output 
+            a strong defining what assays L3 should be output
+        resolve_hom_hemi; bool, default True
+            If True, the L3 file written to disk resolves ambiguous "Hom/Hemi" Genotype
+            labels to "Hom" or "Hemi" using Sex (Female -> Hom, Male -> Hemi). If False
+            (i.e., resolve_hom_hemi=False), "Hom/Hemi" is written out as-is. The returned dataframe always
+            keeps "Hom/Hemi" unresolved regardless of this setting.
     """
 
     status.step("Preparing L3")
@@ -895,6 +900,8 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
     df_merged = df.copy()
     metric_csv = with_session_suffix_for_csv(df_merged, metric_cols)
 
+
+
     ### Prepare final export columns
     def _metric_match(col: str) -> bool:
         return any(col.startswith(base + "_") for base in metric_cols)
@@ -918,7 +925,15 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
     cols_out = [c for c in cols_out if c in metric_csv.columns]
     metric_csv = metric_csv.loc[:, cols_out].copy()
 
-    ### get name of file
+    # Resolve ambiguous Hom/Hemi genotype labels using Sex (Female -> Hom, Male -> Hemi)
+    # Applied only to the CSV export; the returned dataframe keeps "Hom/Hemi" as-is.
+    if resolve_hom_hemi and "Genotype" in metric_csv.columns and "Sex" in metric_csv.columns:
+        ambiguous = metric_csv["Genotype"].astype(str).str.lower() == "hom/hemi"
+        if ambiguous.any():
+            is_female = metric_csv.loc[ambiguous, "Sex"].astype(str).str.lower().str.startswith("f")
+            metric_csv.loc[ambiguous, "Genotype"] = is_female.map({True: "Hom", False: "Hemi"})
+
+    ### get name of file ###
     example = df_merged.iloc[0]
 
     strain_name = str(example.get("Gene", example.get("Strain", "NA"))).replace(" ", "_")
@@ -936,7 +951,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None,):
     status.preview(df_md, msg="L3 Dataframe")
 
     out_path = out_dir / fname
-    metric_csv.to_csv(out_path, index=False)
+    metric_csv_out.to_csv(out_path, index=False)
 
     return(metric_csv)
 

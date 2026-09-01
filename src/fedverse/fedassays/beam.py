@@ -359,20 +359,25 @@ def plot_file_fit(index):
 
 
 
-def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = LIGHTS_OFF_HOUR ):
+def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = LIGHTS_OFF_HOUR, resolve_hom_hemi = True ):
     """
-    BEAM workflow is different enough that the output L3 for beam cannot be replicated through the 
+    BEAM workflow is different enough that the output L3 for beam cannot be replicated through the
     core l3.
-    
+
     Arguments:
         beam_list; List
             List contating multiple BEAM Dataframes
         md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_metakey   
+            meta dataframe that contatins cropped bandit key created by build_metakey
         id_col; String, default "Mouse_ID"
             String detailing what column will serve as the key column to link both metadata and metric files
         lights_off:
             When the lights turn off
+        resolve_hom_hemi; bool, default True
+            If True, the L3 file written to disk resolves ambiguous "Hom/Hemi" Genotype
+            labels to "Hom" or "Hemi" using Sex (Female -> Hom, Male -> Hemi). If False
+            (default), "Hom/Hemi" is written out as-is. The returned dataframe always
+            keeps "Hom/Hemi" unresolved regardless of this setting.
     Returns:
         beammetrics; Dataframe
             Dataframe containing aggragate metrics from all mice for Bandit assays
@@ -570,6 +575,13 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
     beam_l3 = beam_l3.drop(columns=drop_existing)
 
 
+    # Resolve ambiguous Hom/Hemi genotype labels using Sex (Female -> Hom, Male -> Hemi)
+    # Applied only to the CSV export; the returned dataframe keeps "Hom/Hemi" as-is.
+    if resolve_hom_hemi and "Genotype" in beam_l3.columns and "Sex" in beam_l3.columns:
+        ambiguous = beam_l3["Genotype"].astype(str).str.lower() == "hom/hemi"
+        if ambiguous.any():
+            is_female = beam_l3.loc[ambiguous, "Sex"].astype(str).str.lower().str.startswith("f")
+            beam_l3.loc[ambiguous, "Genotype"] = is_female.map({True: "Hom", False: "Hemi"})
 
 
     ### get name of file
