@@ -140,7 +140,7 @@ def pr1_indv_plots(fed_list, metadata_df, root_path, dpi=150):
         ### Save Plots ###
         # suggest a base filename for saving
         safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title_str)
-        suggested = f"{safe_title}_indvPR1"
+        suggested = f"{safe_title}_indvPR1.pdf"
 
         # assign path
         out_path = out_dir / suggested
@@ -978,7 +978,9 @@ def assemble_pr_l4(long_df, x_colors, ordered_x, bm_md, root_path,
 
     status.step("Assembling PR1 L4 composite figure")
 
-    out_dir = Path(root_path, "L4")
+    # root_path is already the target L4 directory when called from run_pr_l1_l4.
+    # Do not add a second "L4" suffix here, or it creates L4/L4 inside the task.
+    out_dir = Path(root_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Gene name that replaces the generic "HET" label throughout the figure.
@@ -1222,6 +1224,14 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     """
     root_path = Path(root_path)
 
+    l3_dir = root_path / "L3"
+    l4_dir = root_path / "L4"
+    working_dir = root_path / "Working data and graphs"
+
+    l3_dir.mkdir(parents=True, exist_ok=True)
+    l4_dir.mkdir(parents=True, exist_ok=True)
+    working_dir.mkdir(parents=True, exist_ok=True)
+
     # ------ Ingest data ------ #
     # call to lkoad lists and ingest the data from the l1 folder
     fed_list, loaded_files, session_types = core.ingest_l1(l1_path)
@@ -1234,7 +1244,7 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     key_df2 = core.build_or_rematch_key_df(loaded_files, session_types, key_df, msg_hint = f"Key status: {msg}")
 
     # Create Individual PR1 plots
-    saved_paths_indv = pr1_indv_plots(fed_list, key_df2, root_path)
+    saved_paths_indv = pr1_indv_plots(fed_list, key_df2, working_dir)
 
     # --- Individual plots + metrics -> L3 ---
     # Clean PR1 metadata
@@ -1249,7 +1259,7 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     pm_md = core.attach_meta(pm, md, id_col)
 
     # Build the l3
-    l3_path = core.output_l3(pm_md, id_col, other_id, meta_cols, root_path, assay = "pr1", )
+    l3_path = core.output_l3(pm_md, id_col, other_id, meta_cols, l3_dir, assay = "pr1", )
 
     # Build groupings
     mapped_df = core.build_group_selections(md)
@@ -1265,7 +1275,7 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     x_checks, x_colors, ordered_x = core.define_aesthetics(pm_long)
 
     # Actually create the bar plots 
-    barplot_paths = core._run_plots(pm_long, x_checks, x_colors, ordered_x, root_path)
+    barplot_paths = core._run_plots(pm_long, x_checks, x_colors, ordered_x, working_dir)
 
     # Honor a caller-supplied palette; otherwise use the aesthetics defaults.
     x_checks, x_colors, ordered_x = core.define_aesthetics(pm_long)
@@ -1276,10 +1286,10 @@ def run_pr_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     fig, stats = plot_group_mean_demand_with_params(mapped_df, pm_grps_df, md, x_colors)
 
     # --- build stats table --- #
-    stats_df = core.build_stats_table(pm_long, ordered_x, root_path, assay="pr1")
+    stats_df = core.build_stats_table(pm_long, ordered_x, l4_dir, assay="pr1")
 
     # --- Build L4 --- #
-    l4_path = assemble_pr_l4(pm_long, x_colors, ordered_x, pm_md, root_path, fed_list=fed_list, metadata_df=key_df2)
+    l4_path = assemble_pr_l4(pm_long, x_colors, ordered_x, pm_md, l4_dir, fed_list=fed_list, metadata_df=key_df2)
 
     ### Return PR class ###
     return PRResult(fed_list, key_df2, saved_paths_indv, pm_md, pm_long,

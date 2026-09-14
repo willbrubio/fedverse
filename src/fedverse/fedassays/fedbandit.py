@@ -189,7 +189,7 @@ def _plot_file_core(fed_list, metadata_df, root_path, dpi=150):
 
         # suggest a base filename for saving
         safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title_text)
-        suggested = f"{safe_title}_pLeft"
+        suggested = f"{safe_title}_pLeft.pdf"
 
         out_path = out_dir / suggested
         
@@ -617,10 +617,18 @@ def plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path):
 
     plt.figure(figsize=(7, 5))
     # --- Plot (lines with SEM ribbons) ---
-    group_order = sorted(rev_df["Display_Group"].dropna().unique().tolist()) 
-    # ensure WT is first
-    group_order = ["WT"] + sorted(g for g in group_order if g != "WT")
-
+    group_order = sorted(rev_df["Display_Group"].dropna().unique().tolist())
+    # If any WT-like group is present, keep those labels first; otherwise leave the
+    # observed ordering alone instead of injecting a nonexistent "WT" entry.
+    if group_order:
+        wt_present = any(_is_wt_group_label(g) for g in group_order)
+        if wt_present:
+            group_order = sorted(
+                group_order,
+                key=lambda g: (0 if _is_wt_group_label(g) else 1, str(g).upper())
+            )
+        else:
+            group_order = sorted(group_order, key=lambda g: str(g).upper())
 
     ax = sns.lineplot(
         data=rev_df.sort_values(["Display_Group", "Timepoint"]),
@@ -674,7 +682,7 @@ def plot_rev_learning(rev_df, x_colors, ordered_x, bm_md, root_path):
     #plt.show()
 
     safe_name = genename + "_rev_learning"
-    out_path = out_dir / f"{safe_name}.png"
+    out_path = out_dir / f"{safe_name}.pdf"
 
     # Save at print-friendly resolution; bbox_inches="tight" trims the
     # generous whitespace left by the 2-panel layout + rotated x-labels.
@@ -1004,7 +1012,7 @@ def _plot_file_core_display(fed_list, metadata_df, root_path, dpi=150,
         plt.tight_layout()
 
         safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in mouse_id)
-        out_path = out_dir / f"{safe_title}_pLeft.png"
+        out_path = out_dir / f"{safe_title}_pLeft.pdf"
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
@@ -1353,23 +1361,34 @@ def assemble_bandit_l4(long_df, rev_df, x_colors, ordered_x, bm_md, root_path,
     # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
     cap_frac = n_lines * font_size * 1.7 / (fig_h * 72)
     print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
-    
-    # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
-    longest = max((len(str(g)) for g in group_order), default=0)
-    # ~0.011 fig-fraction per char at fontsize 14 on a 9in figure; tune the constant
-    label_depth = longest * 0.011 * (9 / fig_h)
-    
-    fig.subplots_adjust(bottom=cap_frac + label_depth)
 
+    # Measure the actual bottom extent of rendered x-axis labels rather than using a
+    # rough character-count guess. This matters when HOM and HEMI are not merged:
+    # the label set is longer and the bars are more crowded, so the crude estimate
+    # underestimates the needed space and the caption collides with the tick labels.
+    fig.canvas.draw()
+    bottom_px = fig.bbox.height
+    for ax_ in fig.axes:
+        try:
+            for tick in ax_.get_xticklabels():
+                bb = tick.get_window_extent(fig.canvas.get_renderer())
+                bottom_px = min(bottom_px, bb.y0)
+        except Exception:
+            pass
 
-    
+    # Convert the lowest label position to a normalized bottom margin, but clamp it to
+    # a moderate range. The previous conservative cap created a very large blank gutter
+    # under the figure, so we now reserve only enough space to keep the caption clear of
+    # the tick labels without leaving a noticeable gap beneath the full panel layout.
+    label_depth = max(0.0, (fig.bbox.height - bottom_px) / fig.bbox.height)
+    label_depth = min(max(label_depth + 0.01, 0.08), 0.18)
 
-
-
+    fig.subplots_adjust(bottom=min(cap_frac + label_depth, 0.22), top=0.96)
 
     out_path = out_dir / f"{genename}_L4.svg"
-    # bbox_inches="tight" keeps the caption and shared legend from being clipped.
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format = "svg")
+    # Keep a stable figure footprint; the explicit bottom margin is the control
+    # we want, not an auto-crop based on the labels themselves.
+    fig.savefig(out_path, dpi=dpi, format="svg")
     plt.close(fig)
 
     status.ok(f"L4 composite saved -> {out_path}")

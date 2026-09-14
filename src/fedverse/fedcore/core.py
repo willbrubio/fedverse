@@ -1219,6 +1219,8 @@ def define_aesthetics(long_df):
         "HOM":      "#FFB193",
         "HEMI":     "#D2ACD3",
     }
+    #add an argument that passes in a list or column  
+
 
     def _default_color(group, idx):
         """Explicitly apply genotype color if we have one else use positional default."""
@@ -2247,10 +2249,10 @@ def _run_plots(long_df, x_checks, x_colors, ordered_x, root_path, mode = "ref", 
             continue
 
         safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", metric).strip("_")
-        out_path = out_dir / f"{safe_name}.png"
+        out_path = out_dir / f"{safe_name}.pdf"
 
-        # Save at print-friendly resolution; bbox_inches="tight" trims the
-        # generous whitespace left by the 2-panel layout + rotated x-labels.
+        # Save the per-metric bar plots as PDFs for archival/print-friendly use.
+        # The final L4 composite figure keeps its own format handling in each assay.
         fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
         plt.close(fig)

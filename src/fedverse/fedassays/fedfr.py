@@ -563,10 +563,10 @@ def plot_interpellet_interval(fed_list, mapped_df, df_md,  x_colors, root_path):
 
     # define what to save the plot as
     safe_name = genename + "_interpellet_interval"
-    out_path = out_dir / f"{safe_name}.png"
+    out_path = out_dir / f"{safe_name}.pdf"
 
-    # Save at print-friendly resolution; bbox_inches="tight" trims the
-    # generous whitespace left by the 2-panel layout + rotated x-labels.
+    # Save the per-metric working plot as PDF while the final L4 composite
+    # keeps its own display-format handling elsewhere in the pipeline.
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
     plt.close(fig)
@@ -745,7 +745,7 @@ def assemble_fr_l4(long_df, x_colors, bm_md, root_path,
     status.step("Assembling FR1 L4 composite figure")
 
     ### --- Prepare output directory, gene name, and relabeling --- ###
-    out_dir = Path(root_path, "L4")
+    out_dir = Path(root_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Gene name that replaces the generic "HET" label throughout the figure.
@@ -1028,6 +1028,14 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *,  colors=None, dpi=300):
     """
     root_path = Path(root_path)
 
+    l3_dir = root_path / "L3"
+    l4_dir = root_path / "L4"
+    working_dir = root_path / "Working data and graphs"
+
+    l3_dir.mkdir(parents=True, exist_ok=True)
+    l4_dir.mkdir(parents=True, exist_ok=True)
+    working_dir.mkdir(parents=True, exist_ok=True)
+
     # ------ Ingest data ------ #
     # call to lkoad lists and ingest the data from the l1 folder
     fed_list, loaded_files, session_types = core.ingest_l1(l1_path)
@@ -1051,7 +1059,7 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *,  colors=None, dpi=300):
     fm_md = core.attach_meta(fm, md, id_col)
 
     # Build the l3
-    fm_l3 = core.output_l3(fm_md, id_col, other_id, meta_cols, root_path, assay = "fr1")
+    fm_l3 = core.output_l3(fm_md, id_col, other_id, meta_cols, l3_dir, assay = "fr1")
 
     # ------ Plot the fr metrics ------ #
     # Build groupings
@@ -1067,16 +1075,16 @@ def run_fr_l1_l4(l1_path, key_path, root_path, *,  colors=None, dpi=300):
     x_checks, x_colors, ordered_x = core.define_aesthetics(fm_long)
 
     # plot the metrics
-    barplot_paths = core._run_plots(fm_long, x_checks, x_colors, ordered_x, root_path)
+    barplot_paths = core._run_plots(fm_long, x_checks, x_colors, ordered_x, working_dir)
 
     # ------ Plot the inter-pellet interval ------ #
-    interpellet_path = plot_interpellet_interval(fed_list, mapped_df, fm_md, x_colors, root_path)
+    interpellet_path = plot_interpellet_interval(fed_list, mapped_df, fm_md, x_colors, working_dir)
 
     # ------ Build the stats table ------ #
-    stats_df = core.build_stats_table(fm_long, ordered_x, root_path, assay="fr1")
+    stats_df = core.build_stats_table(fm_long, ordered_x, l4_dir, assay="fr1")
 
     # ------ Assemble the L4 composite figure ------ #
-    l4_path = assemble_fr_l4(fm_long, x_colors, fm_md, root_path, fed_list, mapped_df)
+    l4_path = assemble_fr_l4(fm_long, x_colors, fm_md, l4_dir, fed_list, mapped_df)
 
 
     ### ------ Return the frclass ------ ###

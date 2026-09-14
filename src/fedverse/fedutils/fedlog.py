@@ -8,6 +8,18 @@ logging.basicConfig(
     format="%(message)s",       # We handle our own prefixes; skip logging's default noise
     stream=sys.stderr,
 )
+
+# Suppress verbose font subsetting / PDF export noise from downstream libraries.
+# Keep the fedverse logger at INFO so project status messages still show.
+for _name in (
+    "fontTools",
+    "fontTools.subset",
+    "matplotlib",
+    "matplotlib.font_manager",
+    "matplotlib.backends",
+):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
 log = logging.getLogger("fedverse")
 
 
