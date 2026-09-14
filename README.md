@@ -49,7 +49,8 @@ This library consists of sub libraries in this specific heiarchy:
 ├──fedassays
 |   ├──fedbandit.py
 |   ├──fedpr1.py
-|   └──fedfr1.py
+|   ├──fedfr1.py
+|   └──beam.py
 ├──fedassets
 ├──fedcore
 |   └──core.py

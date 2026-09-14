@@ -17,6 +17,8 @@ Examples:
     python populate_testdata.py --go                      # copy everything
     python populate_testdata.py --go --verify                    # copy all + validate
     python populate_testdata.py --go --verify --models 001_MYT1L # one model
+    python populate_testdata.py --assay beam               # dry-run, beam only, all models
+    python populate_testdata.py --assay beam --go           # copy beam for every model
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ ASSAY_MAP = {
     "4_Bandit80_20": "bandit80",
     "2_FR1":         "fr1",
     "5_PR":          "pr",
+    "3_BEAM":        "beam"
 }
 
 # Source level folder -> test name.
@@ -153,6 +156,9 @@ def parse_args() -> argparse.Namespace:
                    help="actually copy (default: dry-run preview only)")
     p.add_argument("--models", nargs="*", default=None,
                    help="restrict to these model folder names (default: all)")
+    p.add_argument("--assay", default=None,
+                   help="restrict to one assay type, across all models "
+                        f"({', '.join(sorted(set(ASSAY_MAP.values())))})")
     p.add_argument("--src", type=Path, default=SRC_ROOT, help="source root")
     p.add_argument("--dst", type=Path, default=DST_ROOT, help="destination root")
     p.add_argument("--verify", action="store_true",
@@ -161,10 +167,25 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def resolve_assay_map(selected: str | None) -> dict[str, str]:
+    # restrict ASSAY_MAP to one assay, matched against either the source
+    # folder name (e.g. "3_BEAM") or the output test name (e.g. "beam")
+    if not selected:
+        return ASSAY_MAP
+    key = selected.lower()
+    filtered = {src: out for src, out in ASSAY_MAP.items()
+                if out.lower() == key or src.lower() == key}
+    if not filtered:
+        valid = ", ".join(sorted(set(ASSAY_MAP.values())))
+        sys.exit(f"Unknown --assay {selected!r}. Choose from: {valid}")
+    return filtered
+
+
 def main() -> None:
     args = parse_args()
     dry_run = not args.go
     src_root, dst_root = args.src, args.dst
+    assay_map = resolve_assay_map(args.assay)
 
     if not src_root.is_dir():
         sys.exit(f"Source root not found: {src_root}")
@@ -180,8 +201,9 @@ def main() -> None:
     if not model_dirs:
         sys.exit("No matching model folders found.")
 
+    assay_note = f", assay={next(iter(assay_map.values()))}" if args.assay else ""
     print(f"{'DRY-RUN — ' if dry_run else ''}{len(model_dirs)} model(s) "
-          f"-> {dst_root}")
+          f"-> {dst_root}{assay_note}")
     if args.verify and dry_run:
         print("note: --verify has no effect in a dry-run (nothing copied)")
 
@@ -200,7 +222,7 @@ def main() -> None:
                 copy_file(key, model_out / key.name.lower(), dst_root,
                           dry_run, verify, failures)
 
-        for src_assay, out_assay in ASSAY_MAP.items():
+        for src_assay, out_assay in assay_map.items():
             assay_dir = find_child_dir(model_dir, src_assay)
             if assay_dir is None:
                 print(f"  (skip) {src_assay} — not found")
