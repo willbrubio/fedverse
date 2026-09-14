@@ -11,3 +11,4 @@ TESTDATADIR/
 *.ps1
 push2git.txt
 .venv
+.venv-fedverse

@@ -108,7 +108,6 @@ def _plot_file_core(fed_list, metadata_df, root_path, dpi=150):
 
     status.step("Beginning to plot bandit assays")
 
-
     # intitate a empty list to capture the results
     saved_paths  = []
 
@@ -337,7 +336,7 @@ def compute_bandit_metrics(fed_list, md, id_col="Mouse_ID"):
         fed_list; List
             List contating multiple FED Dataframes
         md; Dataframe
-            meta dataframe that contatins cropped bandit key created by build_bandit_metakey   
+            meta dataframe that contatins cropped bandit key created by build_metakey   
         id_col; String, default "Mouse_ID"
             String detailing what column will serve as the key column to link both metadata and metric files
     Returns:

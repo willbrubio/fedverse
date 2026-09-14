@@ -66,6 +66,11 @@ def _run_pr(root: Path, l1_zip: Path, key: Path):
     return fedpr1.run_pr_l1_l4(l1_zip, key, root)
 
 
+def _run_beam(root: Path, l1_zip: Path, key: Path):
+    from fedverse.fedassays import beam
+    return beam.run_beam_l1_l4(l1_zip, key, root)
+
+
 # assay folder name -> callable(root, l1_zip, key). Register new assays here.
 # All lambdas forward (root, l1, key) unchanged — no reordering.
 ASSAY_RUNNERS = {
@@ -73,6 +78,7 @@ ASSAY_RUNNERS = {
     "bandit80":  lambda root, l1, key: _run_bandit(root, l1, key, "80"),
     "fr1":       lambda root, l1, key: _run_fr(root, l1, key),
     "pr":        lambda root, l1, key: _run_pr(root, l1, key),
+    "beam":      lambda root, l1, key: _run_beam(root, l1, key),
 }
 
 
