@@ -549,6 +549,17 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
         suffixes=("", "_cosinor")
     )
 
+    # Force the L3 session label to the BEAM assay, and drop the cosinor-derived
+    # Mouse_ID duplication that is only used for fit bookkeeping.
+    if "Session_type" in beam_l3.columns:
+        beam_l3["Session_type"] = "BEAM"
+    else:
+        beam_l3["Session_type"] = "BEAM"
+
+    for extra_col in ["Mouse_ID_cosinor", "Mouse_IDs_seen_in_file", "ID_source"]:
+        if extra_col in beam_l3.columns:
+            beam_l3 = beam_l3.drop(columns=[extra_col])
+
     # 4. Merge Night_z and Day_z
     beam_l3 = beam_l3.merge(
         phase_agg[["filename", "Night_z", "Day_z"]],
@@ -568,6 +579,7 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
         "file_key",
         "ID_source",
         "Mouse_IDs_seen_in_file",
+        "Mouse_ID_cosinor",
         "Fit_Status",
         "N_hours_used",
     ]
@@ -861,10 +873,10 @@ def plot_xgroup_cosinor(beam_data, files_to_group_x, x_colors, ordered_x, out_pa
         # --- save the plot --- #
         if write:
             safe_name = genename + "_xgrouped_cosinor"
-            out_path = out_dir / f"{safe_name}.png"
+            out_path = out_dir / f"{safe_name}.pdf"
 
-            # Save at print-friendly resolution; bbox_inches="tight" trims the
-            # generous whitespace left by the 2-panel layout + rotated x-labels.
+            # Save as PDF for the downloaded output; the composite L4 figure itself
+            # remains a PNG/SVG as defined in assemble_beam_l4.
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
         plt.close(fig)
@@ -881,7 +893,7 @@ def plot_xgroup_cosinor(beam_data, files_to_group_x, x_colors, ordered_x, out_pa
 
 
 def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
-                schematic_path=None, dpi=300, figsize=(12, 10), h_space = 0.3, 
+                schematic_path=None, dpi=300, figsize=(12, 10), h_space = 0.55, 
                 font_size=14, leading = 1.4):
     """
     Assemble the composite "L4" deliverable figure for one knockout model:
@@ -928,8 +940,9 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
 
     status.step("Assembling L4 composite figure")
 
-    # --- create a directory to write to --- #
-    out_dir = Path(out_path, "L4")
+    # out_path is already the task-level L4 directory when called from run_beam_l1_l4.
+    # Do not add a second "L4" suffix here or we create nested L4/L4 folders.
+    out_dir = Path(out_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Gene name that replaces the generic "HET" label throughout the figure.
@@ -961,41 +974,75 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
     present = long_df["XGroup"].dropna().unique().tolist()
 
 
-    # Isolate all non-wt group names
+    # ------------------------------------------------------------
+    # Relabel zygosities to display form
+    # ------------------------------------------------------------
+    zygotic_order = ["HET", "HOM", "HOM/HEMI", "HEMI"]
+    zyg_display = {
+        "HET": "Het",
+        "HOM": "Hom",
+        "HOM/HEMI": "Hom/Hemi",
+        "HEMI": "Hemi",
+    }
+
+    # Find all XGroups present
+    present = long_df["XGroup"].dropna().unique().tolist()
+
+    # Non-WT groups
     non_wt = [g for g in present if str(g).upper() != "WT"]
-    multi  = len(non_wt) > 1
+
+    # ------------------------------------------------------------
+    # A Hom-only experiment should behave like the Hom/Hemi
+    # layout because it still needs the genotype label + gene
+    # name underneath the small bar plots.
+    # ------------------------------------------------------------
+    hom_style_layout = any(
+        str(g).upper() in {"HOM", "HOM/HEMI", "HEMI"}
+        for g in non_wt
+    )
+
+    # Treat:
+    #   WT + Het       -> simple layout: WT / GENE
+    #   WT + Hom       -> genotype layout: WT / Hom, with GENE below
+    #   WT + Hom/Hemi  -> genotype layout
+    #   multiple mutant groups -> genotype layout
+    multi = len(non_wt) > 1 or hom_style_layout
 
     if not multi:
         relabel = {g: genename for g in non_wt}
     else:
-        relabel = {g: zyg_display.get(str(g).upper(), str(g).title()) for g in non_wt}
+        relabel = {
+            g: zyg_display.get(str(g).upper(), str(g).title())
+            for g in non_wt
+        }
 
     long_df["XGroup"] = long_df["XGroup"].replace(relabel)
 
-
-
-    # --- Order: WT first, then mutants by zygotic_order (unknowns sort last) ---
+    # ------------------------------------------------------------
+    # Order: WT first, then mutants
+    # ------------------------------------------------------------
     def _zygo_rank(orig_label):
         up = str(orig_label).upper()
-        return zygotic_order.index(up) if up in zygotic_order else len(zygotic_order)
+        return (
+            zygotic_order.index(up)
+            if up in zygotic_order
+            else len(zygotic_order)
+        )
 
-    # conduct the actual ordering of the mutant groups (WT is always first)
     non_wt_sorted = sorted(non_wt, key=_zygo_rank)
+
     group_order = ["WT"] + [relabel[g] for g in non_wt_sorted]
 
-
-
-
-    # --- Resolve colors keyed to the FINAL display labels ---
-    # x_colors keys are inconsistent upstream (raw "HOM"/"HEMI" but bare gene for
-    # het), so for each final label we try several candidate source keys,
-    # case-insensitively, before falling back.
+    # ------------------------------------------------------------
+    # Resolve colors keyed to final display labels
+    # ------------------------------------------------------------
     def _resolve_widget(entry):
-        val = getattr(entry, "value", entry)          # widget -> .value, else itself
+        val = getattr(entry, "value", entry)
         val = val.strip() if isinstance(val, str) else ""
         return val or None
 
-    xc_norm = {}                                      # UPPER(source key) -> color
+    xc_norm = {}
+
     for k, v in x_colors.items():
         c = _resolve_widget(v)
         if c:
@@ -1006,50 +1053,80 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
 
     def _color_for(final_label):
         orig = final_to_orig.get(final_label, final_label)
+
         for cand in (orig, genename, final_label):
             hit = xc_norm.get(str(cand).upper())
+
             if hit:
                 return hit
+
         return "tab:blue"
 
     color_map = {g: _color_for(g) for g in group_order}
-    # One controlled Sex order shared by every bar panel so dot colors line up.
-    hue_order = core._order_hue_groups(long_df["HueGroup"].dropna().unique().tolist())
 
-    # A copy of the mapping relabeled to the final display labels, for the IPI panel.
+    hue_order = core._order_hue_groups(
+        long_df["HueGroup"].dropna().unique().tolist()
+    )
+
+    # Copy of mapping relabeled to final display labels
     mapped_relabeled = mapped_df.copy()
+
     if "XGroup" in mapped_relabeled.columns:
-        mapped_relabeled["XGroup"] = mapped_relabeled["XGroup"].replace(relabel)
+        mapped_relabeled["XGroup"] = (
+            mapped_relabeled["XGroup"].replace(relabel)
+        )
 
 
 
 
+    # ============================================================
+    # FIXED L4 TEMPLATE
+    # ============================================================
+    # Use the WT + Het + Hom/Hemi layout as the geometry template
+    # for EVERY figure, regardless of which groups are actually present.
 
-    # ---------------- Figure + grid layout ----------------
+    TEMPLATE_N_GROUPS = 3
+    TEMPLATE_LONGEST_LABEL = len("Hom/Hemi")
+        # ---------------- Figure + grid layout ----------------
     # Row 0: A (schematic) + B, C bars.
     # Row 1: D (Cosinor plot) + E, F, G bars.
     core.set_plot_style()   # one shared font family across every L4 figure
     #fig = plt.figure(figsize=(16, 8))
     fig_w, fig_h = figsize
-    fig = plt.figure(figsize=(fig_w, fig_h))
-    
 
-    # Determine head space based on groups and if hemi is present. 
-    #   If hemi is present, we need more space for the legend. add padding
-    if any("HEMI" in str(g).upper() for g in present):
-        print("L4: HEMI present - adding padding to hspace")
-        h_space = h_space + 0.3
-        cap_space = 0.29
+    # Shrink the entire composite for the hom-style layout so the full two-row
+    # plot block sits higher and leaves enough room for the caption.
+    if hom_style_layout:
+        print(
+            "L4: Hom/Hom-Hemi/Hemi layout - "
+            "using expanded spacing and a shorter composite"
+        )
+        row_ratios = [0.7, 0.7]
     else:
-        h_space = h_space
-        cap_space = 0.25
+        row_ratios = [1.0, 1.0]
 
-    # define the gridspec for the figure
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.0, 1.0], hspace = h_space)
+    fig = plt.figure(figsize=(fig_w, fig_h))
 
-    # define the subgridspec for the top and bottom rows
-    gs_top = gs[0, :].subgridspec(1, 3, width_ratios=[2.5, 1, 1], wspace=0.5)
-    gs_bot = gs[1, :].subgridspec(1, 4, width_ratios=[4.15, 1, 1, 1], wspace=0.45)
+    gs = fig.add_gridspec(
+        nrows=2,
+        ncols=1,
+        height_ratios=row_ratios,
+        hspace=h_space,
+    )
+
+    gs_top = gs[0, :].subgridspec(
+        1,
+        3,
+        width_ratios=[2.5, 1, 1],
+        wspace=0.5,
+    )
+
+    gs_bot = gs[1, :].subgridspec(
+        1,
+        4,
+        width_ratios=[4.15, 1, 1, 1],
+        wspace=0.45,
+    )
 
 
 
@@ -1082,18 +1159,51 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
     shared_handles = []
 
     def _draw_bar(ax, metric, ylabel, letter):
-        """Draw one metric bar panel; returns the sex-legend proxy handles."""
+        ###Draw one metric bar panel using fixed Hom/Hemi-template geometry.###
+
         core._panel_label(ax, letter)
+
         sub = long_df[long_df["variable"] == metric]
+
         if sub["value"].dropna().empty:
             status.warn(f"L4: no data for {metric}; leaving panel blank.")
             ax.axis("off")
             return []
-        return core._plot_metric_display(
-            sub, metric, ax, color_map,
-            group_order=group_order, hue_order=hue_order, ylabel=ylabel,
+
+        handles = core._plot_metric_display(
+            sub,
+            metric,
+            ax,
+            color_map,
+            group_order=group_order,
+            hue_order=hue_order,
+            ylabel=ylabel,
             xlabel=(genename if multi else ""),
         )
+
+        # ------------------------------------------------------------
+        # FIXED HORIZONTAL GROUP GEOMETRY
+        # ------------------------------------------------------------
+        # Matplotlib normally expands 2 groups to fill the whole axis,
+        # making their bars/dots appear larger than in a 3-group plot.
+        #
+        # Always give the categorical axis the width of 3 groups
+        # (WT + Het + Hom/Hemi), and center however many groups are
+        # actually present inside that space.
+        # ------------------------------------------------------------
+        n_groups = len(group_order)
+
+        template_width = max(TEMPLATE_N_GROUPS, n_groups)
+
+        group_center = (n_groups - 1) / 2
+        half_width = template_width / 2
+
+        ax.set_xlim(
+            group_center - half_width,
+            group_center + half_width
+        )
+
+        return handles
 
     for col, (metric, ylabel) in enumerate(top_specs, start=1):   # cols 1..4 (col 0 = schematic)
         ax_bar = fig.add_subplot(gs_top[0, col])
@@ -1140,25 +1250,24 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
         "for the genotype x sex and sex effects refer to the stats table."
     )
 
-    caption = core._wrap_caption(caption_raw, fig_w, fontsize=font_size)
-    fig.text(0.1, 0.02, caption, ha="left", va="bottom", fontsize=font_size)
-    
+    # Widen the caption block so it wraps less aggressively; this reduces the
+    # caption's vertical footprint without changing the actual figure layout.
+    caption = core._wrap_caption(caption_raw, fig_w, fontsize=font_size, left=0.03, right=1)
+
+    # Important: put the caption lower and reserve more actual bottom space.
+    # The overlap is caused by the bottom margin, not the row ratios.
+    fig.text(0.02, 0.00, caption, ha="left", va="bottom", fontsize=font_size)
+
     # Reserve room at the bottom for the caption (tight_layout can't see fig.text).
     n_lines = caption.count("\n") + 1
-    
-    # line height in fig fraction: fontsize pts * ~ 1.6 leading / figure height in pts
     cap_frac = n_lines * font_size * leading / (fig_h * 72)
     print(f"L4: caption {n_lines} lines, reserving {cap_frac:.3f} fig fraction at bottom.")
-    
-    # figure out padding crudely based on the longest group label, so the x-axis labels don't overlap the caption.
-    longest = max((len(str(g)) for g in group_order), default=0)
-    # ~0.011 fig-fraction per char at fontsize 14 on a 9in figure; tune the constant
-    label_depth = longest * 0.011 * (9 / fig_h)
-    
-    fig.subplots_adjust(bottom=cap_frac + label_depth)
 
-
-    
+    # Always reserve enough room for the largest template label:
+    # "Hom/Hemi", even if this particular dataset only contains Het.
+    label_depth = TEMPLATE_LONGEST_LABEL * 0.0065 * (9 / fig_h)
+    fixed_bottom = max(cap_frac + label_depth + 0.01, 0.15)
+    fig.subplots_adjust(bottom=fixed_bottom)
     ##### Save the figure ##### 
     # save as an SVG for vector graphics and future editing.
     out_path = out_dir / f"{genename}_BEAM_L4.svg"
@@ -1166,7 +1275,7 @@ def assemble_beam_l4(long_df, beam_data, mapped_df, x_colors, out_path,
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", format="svg")
     plt.close(fig)
 
-    status.ok(f"FR1 L4 composite saved -> {out_path}")
+    status.ok(f"BEAM L4 composite saved -> {out_path}")
     return out_path
 
 
@@ -1204,6 +1313,14 @@ def run_beam_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     """
     root_path = Path(root_path)
 
+    l3_dir = root_path / "L3"
+    l4_dir = root_path / "L4"
+    working_dir = root_path / "Working data and graphs"
+
+    l3_dir.mkdir(parents=True, exist_ok=True)
+    l4_dir.mkdir(parents=True, exist_ok=True)
+    working_dir.mkdir(parents=True, exist_ok=True)
+
     # ------ Ingest data ------ #
     # call to lkoad lists and ingest the data from the l1 folder
     beam_list, loaded_files, session_types = core.ingest_l1(l1_path)
@@ -1235,16 +1352,16 @@ def run_beam_l1_l4(l1_path, key_path, root_path, *, colors=None, dpi=300):
     x_checks, x_colors, ordered_x = core.define_aesthetics(beam_long)
 
     # plot the metrics
-    barplot_paths = core._run_plots(beam_long, x_checks, x_colors, ordered_x, root_path)
+    barplot_paths = core._run_plots(beam_long, x_checks, x_colors, ordered_x, working_dir)
 
     # ------ Plot the grouped cosiner plots ------ #
-    fits_xgroup, grp, cos_fig = plot_xgroup_cosinor(beam_data, beam_grps_df, x_colors, ordered_x, root_path)
+    fits_xgroup, grp, cos_fig = plot_xgroup_cosinor(beam_data, beam_grps_df, x_colors, ordered_x, working_dir)
 
     # ------ Build the stats table ------ #
-    stats_df = core.build_stats_table(beam_long, ordered_x, root_path, assay="beam")
+    stats_df = core.build_stats_table(beam_long, ordered_x, l4_dir, assay="beam")
 
     # ------ Assemble the L4 composite figure ------ #
-    l4_path = assemble_beam_l4(beam_long, beam_data, mapped_df, x_colors, root_path)
+    l4_path = assemble_beam_l4(beam_long, beam_data, mapped_df, x_colors, l4_dir)
 
 
     ### ------ Return the frclass ------ ###
