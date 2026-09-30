@@ -951,7 +951,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None, resol
     status.preview(df_md, msg="L3 Dataframe")
 
     out_path = out_dir / fname
-    metric_csv_out.to_csv(out_path, index=False)
+    metric_csv.to_csv(out_path, index=False)
 
     return(metric_csv)
 
@@ -1914,6 +1914,7 @@ def build_stats_table_old(long_df, ordered_x, root_path, mode = "ref", hemicatch
     
     x_label_name = _grouping_label("X")
     hue_label_name = _grouping_label("Hue")
+    
 
     ### run the stats ###
     rows = []
@@ -1947,7 +1948,7 @@ def build_stats_table_old(long_df, ordered_x, root_path, mode = "ref", hemicatch
                 f"p={_fmt_p_num(stats['p_x'])} {_p_to_stars(stats['p_x'])}; "
                 f"{hue_label_name}: {_fmt_F(stats['df_h_num'], stats['df_h_den'], stats['F_h'])}, "
                 f"p={_fmt_p_num(stats['p_h'])} {_p_to_stars(stats['p_h'])}"
-            )
+            ) 
             main_effect_sizes = (
                 f"{x_label_name}: "
                 f"partial η²={_fmt_eta_p2(stats['eta_p_x'])}; "
