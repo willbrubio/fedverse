@@ -951,7 +951,7 @@ def output_l3(df_md, id_col, other_id, meta_cols, root_path, assay = None, resol
     status.preview(df_md, msg="L3 Dataframe")
 
     out_path = out_dir / fname
-    metric_csv_out.to_csv(out_path, index=False)
+    metric_csv.to_csv(out_path, index=False)
 
     return(metric_csv)
 

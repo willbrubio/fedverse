@@ -506,6 +506,23 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
         .rename(columns={activity_col: "Mean_activity"})
     )
 
+    # --- per-file raw mean activity by ZT hour (no z-score) --- #
+    hourly_mean_activity_df = (
+        beam_data
+        .dropna(subset=[activity_col, "datetime"])
+        .assign(
+            ZT_hour=lambda df: (
+                (df["datetime"].dt.hour - lights_off_hr + 12) % 24
+            ) - 12
+        )
+        .groupby(["filename", "ZT_hour"])[activity_col]
+        .mean()
+        .unstack("ZT_hour")
+        .reindex(columns=range(-12, 12))
+        .rename(columns=lambda zt: f"Hourly_mean_activity_ZT{int(zt)}")
+        .reset_index()
+    )
+
     # --- Night_z and Day_z per file (before plotting) --- #
     # night and day should be
     # Night: ZT in [0, 12)
@@ -570,6 +587,13 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
     # 5. Merge raw mean activity (no z-score)
     beam_l3 = beam_l3.merge(
         mean_activity_df,
+        on="filename",
+        how="left"
+    )
+
+    # 6. Merge hourly raw mean activity (no z-score)
+    beam_l3 = beam_l3.merge(
+        hourly_mean_activity_df,
         on="filename",
         how="left"
     )
