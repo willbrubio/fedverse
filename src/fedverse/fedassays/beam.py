@@ -357,8 +357,6 @@ def plot_file_fit(index):
     plt.show()
 
 
-
-
 def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = LIGHTS_OFF_HOUR, resolve_hom_hemi = True ):
     """
     BEAM workflow is different enough that the output L3 for beam cannot be replicated through the
@@ -519,8 +517,69 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
         .mean()
         .unstack("ZT_hour")
         .reindex(columns=range(-12, 12))
-        .rename(columns=lambda zt: f"Hourly_mean_activity_ZT{int(zt)}")
+        .rename(columns=lambda zt: f"mean_activity_zt{int(zt)}")
         .reset_index()
+    )
+
+    # --- per-file environmental means and day/night lux --- #
+    environmental_columns = {
+        "temperature_c": find_col(beam_data, ("temperature_c",)),
+        "pressure_hpa": find_col(beam_data, ("pressure_hpa",)),
+        "humidity_percent": find_col(beam_data, ("humidity_percent",)),
+        "lux": find_col(beam_data, ("lux",)),
+    }
+    missing_environmental_columns = [
+        name for name, column in environmental_columns.items() if column is None
+    ]
+    if missing_environmental_columns:
+        raise RuntimeError(
+            "BEAM data is missing required environmental column(s): "
+            + ", ".join(missing_environmental_columns)
+        )
+
+    environmental_data = beam_data[["filename", "datetime"]].copy()
+    for name, column in environmental_columns.items():
+        environmental_data[name] = pd.to_numeric(
+            beam_data[column], errors="coerce"
+        )
+
+    zt_hour = (
+        (environmental_data["datetime"].dt.hour - lights_off_hr) % 24
+    )
+    environmental_data["phase"] = np.where(zt_hour < 12, "Night", "Day")
+
+    environmental_means_df = (
+        environmental_data.groupby("filename")[
+            ["temperature_c", "pressure_hpa", "humidity_percent"]
+        ]
+        .mean()
+        .rename(columns={
+            "temperature_c": "mean_temp_c",
+            "pressure_hpa": "mean_pressure_hpa",
+            "humidity_percent": "mean_humidity_percent",
+        })
+    )
+    lux_means_df = (
+        environmental_data.groupby(["filename", "phase"])["lux"]
+        .mean()
+        .unstack("phase")
+        .reindex(columns=["Day", "Night"])
+        .rename(columns={"Day": "mean_lux_Day", "Night": "mean_lux_Night"})
+    )
+    environmental_means_df = (
+        environmental_means_df
+        .join(lux_means_df)
+        .reset_index()
+    )
+    environmental_mean_columns = [
+        "mean_temp_c",
+        "mean_pressure_hpa",
+        "mean_humidity_percent",
+        "mean_lux_Day",
+        "mean_lux_Night",
+    ]
+    environmental_means_df[environmental_mean_columns] = (
+        environmental_means_df[environmental_mean_columns].round(2)
     )
 
     # --- Night_z and Day_z per file (before plotting) --- #
@@ -594,6 +653,13 @@ def output_beam_l3(beam_list, md, out_path, id_col="Mouse_ID", lights_off_hr = L
     # 6. Merge hourly raw mean activity (no z-score)
     beam_l3 = beam_l3.merge(
         hourly_mean_activity_df,
+        on="filename",
+        how="left"
+    )
+
+    # 7. Merge per-file environmental means
+    beam_l3 = beam_l3.merge(
+        environmental_means_df,
         on="filename",
         how="left"
     )
