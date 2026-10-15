@@ -12,3 +12,4 @@ TESTDATADIR/
 push2git.txt
 .venv
 .venv-fedverse
+qc/ # for now
